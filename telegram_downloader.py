@@ -291,6 +291,175 @@ def save_config(cfg: dict):
     os.chmod(CONFIG_FILE, 0o600)
 
 
+
+# --------------------------------------------------------------------------
+# Tema visual
+# --------------------------------------------------------------------------
+PALETA = {
+    "fundo":      "#eef1f5",   # fundo da janela
+    "cartao":     "#ffffff",   # superficies
+    "borda":      "#dde2e9",
+    "texto":      "#1e2530",
+    "suave":      "#6b7382",   # texto secundario
+    "acento":     "#2f7fd1",
+    "acento_esc": "#24659f",
+    "acento_luz": "#e8f1fb",
+    "ok":         "#2e9e5b",
+    "alerta":     "#c0392b",
+    "listra":     "#f7f9fb",   # linha alternada
+    "log_fundo":  "#1e2530",
+    "log_texto":  "#d7dde5",
+}
+
+
+def _familia_fonte():
+    """Escolhe a fonte de interface mais adequada ao sistema."""
+    import tkinter.font as tkfont
+    disponiveis = set(tkfont.families())
+    preferidas = {
+        "Darwin":  ("SF Pro Text", "Helvetica Neue", "Lucida Grande"),
+        "Windows": ("Segoe UI Variable Text", "Segoe UI", "Tahoma"),
+    }.get(platform.system(), ("Inter", "Ubuntu", "DejaVu Sans"))
+    for nome in preferidas:
+        if nome in disponiveis:
+            return nome
+    return "TkDefaultFont"
+
+
+def _familia_mono():
+    import tkinter.font as tkfont
+    disponiveis = set(tkfont.families())
+    for nome in ("SF Mono", "JetBrains Mono", "Menlo", "Cascadia Mono",
+                 "Consolas", "DejaVu Sans Mono"):
+        if nome in disponiveis:
+            return nome
+    return "TkFixedFont"
+
+
+def aplicar_tema(root):
+    """Configura o estilo ttk inteiro. Devolve o dicionario de fontes."""
+    P = PALETA
+    fam = _familia_fonte()
+    mono = _familia_mono()
+    base = 12 if platform.system() == "Darwin" else 10
+
+    F = {
+        "corpo":   (fam, base),
+        "peq":     (fam, base - 1),
+        "forte":   (fam, base, "bold"),
+        "h1":      (fam, base + 8, "bold"),
+        "h2":      (fam, base + 3, "bold"),
+        "h3":      (fam, base + 1, "bold"),
+        "mono":    (mono, base - 1),
+    }
+
+    st = ttk.Style(root)
+    st.theme_use("clam")          # o unico tema realmente customizavel
+    root.configure(bg=P["fundo"])
+
+    st.configure(".", background=P["fundo"], foreground=P["texto"],
+                 font=F["corpo"], borderwidth=0, focuscolor=P["acento"])
+
+    st.configure("TFrame", background=P["fundo"])
+    st.configure("Cartao.TFrame", background=P["cartao"], relief="flat")
+    st.configure("Barra.TFrame", background=P["cartao"])
+
+    st.configure("TLabel", background=P["fundo"], foreground=P["texto"])
+    st.configure("Cartao.TLabel", background=P["cartao"])
+    st.configure("H1.TLabel", font=F["h1"])
+    st.configure("H2.TLabel", font=F["h2"])
+    st.configure("H3.TLabel", font=F["h3"])
+    st.configure("Suave.TLabel", foreground=P["suave"], font=F["peq"])
+    st.configure("SuaveCartao.TLabel", background=P["cartao"],
+                 foreground=P["suave"], font=F["peq"])
+
+    # --- botoes
+    st.configure("TButton", padding=(14, 7), relief="flat",
+                 background="#e4e8ee", foreground=P["texto"], font=F["corpo"])
+    st.map("TButton",
+           background=[("pressed", "#cfd6df"), ("active", "#d8dee6"),
+                       ("disabled", "#eef0f3")],
+           foreground=[("disabled", "#a8afba")])
+
+    st.configure("Acento.TButton", background=P["acento"], foreground="white",
+                 font=F["forte"], padding=(18, 8))
+    st.map("Acento.TButton",
+           background=[("pressed", P["acento_esc"]), ("active", "#3a8bdd"),
+                       ("disabled", "#b9cfe6")],
+           foreground=[("disabled", "#eef3f8")])
+
+    st.configure("Perigo.TButton", background="#f3e2e0",
+                 foreground=P["alerta"], padding=(14, 7))
+    st.map("Perigo.TButton", background=[("active", "#ecd2cf")])
+
+    st.configure("Plano.TButton", background=P["cartao"],
+                 foreground=P["acento"], padding=(10, 6))
+    st.map("Plano.TButton", background=[("active", P["acento_luz"])])
+
+    # --- campos
+    st.configure("TEntry", fieldbackground=P["cartao"], foreground=P["texto"],
+                 bordercolor=P["borda"], lightcolor=P["borda"],
+                 darkcolor=P["borda"], borderwidth=1, padding=6,
+                 insertcolor=P["texto"])
+    st.map("TEntry", bordercolor=[("focus", P["acento"])])
+
+    st.configure("TCombobox", fieldbackground=P["cartao"], background=P["cartao"],
+                 bordercolor=P["borda"], arrowcolor=P["suave"],
+                 borderwidth=1, padding=5)
+    st.map("TCombobox",
+           fieldbackground=[("readonly", P["cartao"])],
+           bordercolor=[("focus", P["acento"])])
+
+    st.configure("TCheckbutton", background=P["fundo"], foreground=P["texto"],
+                 indicatorcolor=P["cartao"], indicatormargin=(0, 0, 8, 0),
+                 indicatorrelief="flat", bordercolor=P["borda"],
+                 lightcolor=P["cartao"], darkcolor=P["cartao"],
+                 focuscolor=P["fundo"], padding=(0, 4))
+    st.map("TCheckbutton",
+           indicatorcolor=[("selected", P["acento"]), ("active", P["acento_luz"])],
+           bordercolor=[("selected", P["acento"])],
+           background=[("active", P["fundo"])])
+
+    # --- abas
+    st.configure("TNotebook", background=P["fundo"], borderwidth=0,
+                 tabmargins=(0, 0, 0, 0))
+    st.configure("TNotebook.Tab", background="#e2e6ec", foreground=P["suave"],
+                 padding=(22, 11), font=F["corpo"], borderwidth=0,
+                 bordercolor=P["fundo"], lightcolor="#e2e6ec",
+                 darkcolor="#e2e6ec")
+    st.map("TNotebook.Tab",
+           background=[("selected", P["cartao"]), ("active", "#eaeef4")],
+           foreground=[("selected", P["acento"])],
+           lightcolor=[("selected", P["cartao"])],
+           expand=[("selected", (0, 0, 0, 0))])
+
+    # --- tabelas
+    st.configure("Treeview", background=P["cartao"], fieldbackground=P["cartao"],
+                 foreground=P["texto"], borderwidth=0, rowheight=28,
+                 font=F["corpo"])
+    st.map("Treeview",
+           background=[("selected", P["acento"])],
+           foreground=[("selected", "white")])
+    st.configure("Treeview.Heading", background="#e7ebf1", foreground=P["suave"],
+                 font=F["peq"], relief="flat", padding=(8, 8))
+    st.map("Treeview.Heading", background=[("active", "#dfe4ec")])
+
+    # --- diversos
+    st.configure("TProgressbar", background=P["acento"], troughcolor="#dfe4ec",
+                 borderwidth=0, thickness=8)
+    st.configure("TPanedwindow", background=P["fundo"])
+    st.configure("Sash", sashthickness=8, gripcount=0)
+    st.configure("TLabelframe", background=P["fundo"], bordercolor=P["borda"],
+                 borderwidth=1, relief="solid")
+    st.configure("TLabelframe.Label", background=P["fundo"],
+                 foreground=P["suave"], font=F["peq"])
+    st.configure("TScrollbar", background="#dfe4ec", troughcolor=P["fundo"],
+                 bordercolor=P["fundo"], arrowcolor=P["suave"], borderwidth=0)
+    st.map("TScrollbar", background=[("active", "#ccd3dd")])
+
+    return F
+
+
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
@@ -333,24 +502,41 @@ class App(tk.Tk):
 
     # ---------------------------------------------------------------- UI
     def _build_ui(self):
-        style = ttk.Style(self)
-        try:
-            style.theme_use("aqua")  # macOS
-        except tk.TclError:
-            pass
+        P = PALETA
+        self.F = aplicar_tema(self)
 
-        outer = ttk.Frame(self, padding=12)
+        # ---- cabeçalho
+        topo = tk.Frame(self, bg=P["cartao"], height=64)
+        topo.pack(fill="x")
+        topo.pack_propagate(False)
+        tk.Frame(self, bg=P["borda"], height=1).pack(fill="x")
+
+        marca = tk.Frame(topo, bg=P["cartao"])
+        marca.pack(side="left", padx=18)
+        self.logo = tk.Canvas(marca, width=34, height=34, bg=P["cartao"],
+                              highlightthickness=0)
+        self.logo.pack(side="left", pady=15)
+        self._desenhar_logo()
+        textos = tk.Frame(marca, bg=P["cartao"])
+        textos.pack(side="left", padx=10)
+        tk.Label(textos, text="Telegram Downloader", bg=P["cartao"],
+                 fg=P["texto"], font=self.F["h3"]).pack(anchor="w")
+        tk.Label(textos, text="baixe arquivos de grupos com organização",
+                 bg=P["cartao"], fg=P["suave"], font=self.F["peq"]).pack(anchor="w")
+
+        direita = tk.Frame(topo, bg=P["cartao"])
+        direita.pack(side="right", padx=18)
+        self.btn_login = ttk.Button(direita, text="Conectar",
+                                    style="Plano.TButton", command=self._open_login)
+        self.btn_login.pack(side="right", pady=16)
+        self.pill = tk.Label(direita, textvariable=self.status_var,
+                             bg="#f0f2f5", fg=P["suave"], font=self.F["peq"],
+                             padx=12, pady=5)
+        self.pill.pack(side="right", padx=12, pady=16)
+        self.status_var.trace_add("write", lambda *_a: self._pintar_pill())
+
+        outer = ttk.Frame(self, padding=14)
         outer.pack(fill="both", expand=True)
-
-        # --- barra de status / conexão
-        top = ttk.Frame(outer)
-        top.pack(fill="x", pady=(0, 10))
-        ttk.Label(top, text="Status:").pack(side="left")
-        ttk.Label(top, textvariable=self.status_var, foreground="#555").pack(
-            side="left", padx=(6, 16)
-        )
-        self.btn_login = ttk.Button(top, text="Conectar", command=self._open_login)
-        self.btn_login.pack(side="right")
 
         # divisor arrastável entre as abas e o log
         paned = ttk.PanedWindow(outer, orient="vertical")
@@ -373,14 +559,19 @@ class App(tk.Tk):
         log_frame = ttk.Frame(paned)
         cab = ttk.Frame(log_frame)
         cab.pack(fill="x", pady=(8, 2))
-        ttk.Label(cab, text="Log").pack(side="left")
-        ttk.Label(cab, text="(arraste a divisória acima para ampliar)",
-                  foreground="#888").pack(side="left", padx=8)
-        ttk.Button(cab, text="Limpar", command=self._clear_log).pack(side="right")
+        ttk.Label(cab, text="Atividade", style="H3.TLabel").pack(side="left")
+        ttk.Label(cab, text="arraste a divisória acima para ampliar",
+                  style="Suave.TLabel").pack(side="left", padx=10)
+        ttk.Button(cab, text="Limpar", style="Plano.TButton",
+                   command=self._clear_log).pack(side="right")
 
         caixa = ttk.Frame(log_frame)
         caixa.pack(fill="both", expand=True)
-        self.log = tk.Text(caixa, height=8, wrap="word", font=("Menlo", 11))
+        self.log = tk.Text(caixa, height=8, wrap="word", font=self.F["mono"],
+                           bg=PALETA["log_fundo"], fg=PALETA["log_texto"],
+                           insertbackground=PALETA["log_texto"],
+                           relief="flat", padx=12, pady=10,
+                           selectbackground=PALETA["acento"])
         barra = ttk.Scrollbar(caixa, orient="vertical", command=self.log.yview)
         self.log.configure(yscrollcommand=barra.set)
         barra.pack(side="right", fill="y")
@@ -397,6 +588,28 @@ class App(tk.Tk):
         if pos < 320:
             self._paned.sashpos(0, 320)
 
+    def _desenhar_logo(self):
+        """Miniatura do icone desenhada direto no canvas."""
+        c, P = self.logo, PALETA
+        c.create_rectangle(1, 1, 33, 33, fill=P["acento"], outline="")
+        c.create_rectangle(15, 8, 20, 19, fill="white", outline="")
+        c.create_polygon(11, 17, 24, 17, 17.5, 25, fill="white", outline="")
+        c.create_rectangle(9, 27, 26, 29, fill="white", outline="")
+
+    def _pintar_pill(self):
+        """Colore a etiqueta de status conforme o estado."""
+        txt = self.status_var.get().lower()
+        P = PALETA
+        if "conectado" in txt:
+            fundo, frente = "#e6f4ec", P["ok"]
+        elif "erro" in txt or "não" in txt or "nao" in txt:
+            fundo, frente = "#fbeae8", P["alerta"]
+        elif "conectando" in txt:
+            fundo, frente = P["acento_luz"], P["acento"]
+        else:
+            fundo, frente = "#f0f2f5", P["suave"]
+        self.pill.configure(bg=fundo, fg=frente)
+
     def _clear_log(self):
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
@@ -408,7 +621,8 @@ class App(tk.Tk):
 
         bar = ttk.Frame(tab)
         bar.pack(fill="x", pady=(0, 8))
-        ttk.Button(bar, text="Carregar grupos", command=self.load_dialogs).pack(side="left")
+        ttk.Button(bar, text="Carregar grupos", style="Acento.TButton",
+                   command=self.load_dialogs).pack(side="left")
         ttk.Label(bar, text="Filtrar:").pack(side="left", padx=(16, 4))
         ent = ttk.Entry(bar, textvariable=self.filter_var, width=30)
         ent.pack(side="left")
@@ -422,7 +636,8 @@ class App(tk.Tk):
         # empacotado ANTES da tabela para nunca ser espremido para fora
         rodape = ttk.Frame(tab)
         rodape.pack(side="bottom", fill="x", pady=(8, 0))
-        ttk.Button(rodape, text="Analisar grupo selecionado →",
+        ttk.Button(rodape, text="Analisar grupo selecionado  →",
+                   style="Acento.TButton",
                    command=self.analyze_selected).pack(side="right")
 
         corpo = ttk.Frame(tab)
@@ -438,6 +653,7 @@ class App(tk.Tk):
         rol_d.pack(side="right", fill="y")
         self.tree_dialogs.pack(side="left", fill="both", expand=True)
         self.tree_dialogs.bind("<Double-1>", lambda _e: self.analyze_selected())
+        self.tree_dialogs.tag_configure("par", background=PALETA["listra"])
 
 
     def _build_tab_analise(self):
@@ -447,11 +663,12 @@ class App(tk.Tk):
         head = ttk.Frame(tab)
         head.pack(side="top", fill="x", pady=(0, 8))
         self.grupo_label = ttk.Label(head, text="Nenhum grupo selecionado",
-                                     font=("Helvetica", 13, "bold"))
+                                     style="H3.TLabel")
         self.grupo_label.pack(side="left")
         ttk.Label(head, text="Limite de msgs (0 = tudo):").pack(side="left", padx=(20, 4))
         ttk.Entry(head, textvariable=self.limit_var, width=8).pack(side="left")
-        self.btn_scan = ttk.Button(head, text="Analisar", command=self.start_scan)
+        self.btn_scan = ttk.Button(head, text="Analisar", style="Acento.TButton",
+                                   command=self.start_scan)
         self.btn_scan.pack(side="left", padx=8)
 
         # ---- controles fixos: empacotados de baixo para cima, ANTES da tabela,
@@ -459,9 +676,11 @@ class App(tk.Tk):
         act = ttk.Frame(tab)
         act.pack(side="bottom", fill="x", pady=(12, 0))
         self.btn_download = ttk.Button(act, text="Baixar selecionados",
+                                       style="Acento.TButton",
                                        command=self.start_download)
         self.btn_download.pack(side="left")
         self.btn_cancel = ttk.Button(act, text="Cancelar", state="disabled",
+                                     style="Perigo.TButton",
                                      command=lambda: self.cancel_flag.set())
         self.btn_cancel.pack(side="left", padx=8)
         self.progress = ttk.Progressbar(act, mode="determinate", length=380)
@@ -485,7 +704,7 @@ class App(tk.Tk):
                              state="readonly", width=22)
         combo.pack(side="left", padx=6)
         combo.bind("<<ComboboxSelected>>", lambda _e: self._preview_org())
-        self.org_label = ttk.Label(org, text="", foreground="#666")
+        self.org_label = ttk.Label(org, text="", style="Suave.TLabel")
         self.org_label.pack(side="left", padx=10)
         ttk.Button(org, text="Reorganizar pasta destino",
                    command=self.reorganizar).pack(side="right")
@@ -508,7 +727,7 @@ class App(tk.Tk):
         ttk.Button(sel, text="Limpar seleção",
                    command=lambda: self.tree_ext.selection_remove(
                        self.tree_ext.get_children())).pack(side="left", padx=6)
-        self.sel_label = ttk.Label(sel, text="Nada selecionado", foreground="#333")
+        self.sel_label = ttk.Label(sel, text="Nada selecionado", style="H3.TLabel")
         self.sel_label.pack(side="left", padx=16)
 
         # ---- corpo: arvore a esquerda, pre-visualizacao a direita
@@ -541,22 +760,27 @@ class App(tk.Tk):
         self.tree_ext.bind("<<TreeviewSelect>>", lambda _e: (
             self._update_selection_label(), self._on_select_preview()))
         self.tree_ext.bind("<<TreeviewOpen>>", self._expandir_no)
+        self.tree_ext.tag_configure("cat", font=self.F["forte"],
+                                    background=PALETA["acento_luz"])
+        self.tree_ext.tag_configure("ext", font=self.F["corpo"])
+        self.tree_ext.tag_configure("par", background=PALETA["listra"])
+        self.tree_ext.tag_configure("dup", foreground=PALETA["suave"])
 
         # ---- painel de pre-visualizacao
         prev = ttk.Frame(split, padding=(10, 0, 0, 0))
         split.add(prev, weight=2)
-        ttk.Label(prev, text="Pré-visualização",
-                  font=("Helvetica", 12, "bold")).pack(anchor="w")
+        ttk.Label(prev, text="Pré-visualização", style="H3.TLabel").pack(anchor="w")
 
         self.canvas_prev = tk.Canvas(prev, width=300, height=300,
+                                     bg=PALETA["cartao"], relief="flat",
                                      highlightthickness=1,
-                                     highlightbackground="#ccc")
+                                     highlightbackground=PALETA["borda"])
         self.canvas_prev.pack(pady=(6, 6))
         self._msg_prev = self.canvas_prev.create_text(
             150, 150, text="selecione um arquivo", fill="#999", width=260)
 
         self.prev_info = ttk.Label(prev, text="", wraplength=300,
-                                   justify="left", foreground="#444")
+                                   justify="left", style="Suave.TLabel")
         self.prev_info.pack(anchor="w")
 
         nav = ttk.Frame(prev)
@@ -570,10 +794,10 @@ class App(tk.Tk):
                                         command=lambda: self._navegar_thumb(1))
         self.btn_prev_prox.pack(side="left")
 
-        ttk.Button(prev, text="Selecionar todo o post",
-                   command=self._selecionar_post).pack(anchor="w", pady=(10, 0))
+        ttk.Button(prev, text="Selecionar todo o post", style="Acento.TButton",
+                   command=self._selecionar_post).pack(anchor="w", pady=(12, 0))
         ttk.Button(prev, text="Marcar este arquivo",
-                   command=self._marcar_atual).pack(anchor="w", pady=(4, 0))
+                   command=self._marcar_atual).pack(anchor="w", pady=(6, 0))
 
 
     # ------------------------------------------------------------- log
@@ -607,9 +831,9 @@ class App(tk.Tk):
         frm.pack(fill="both", expand=True)
 
         ttk.Label(frm, text="Telegram Downloader",
-                  font=("Helvetica", 20, "bold")).pack(anchor="w")
+                  style="H1.TLabel").pack(anchor="w")
         ttk.Label(frm, text="Baixe arquivos de grupos e canais de forma organizada",
-                  foreground="#666").pack(anchor="w", pady=(2, 18))
+                  style="Suave.TLabel").pack(anchor="w", pady=(2, 18))
 
         passos = (
             "Como funciona:\n\n"
@@ -629,7 +853,8 @@ class App(tk.Tk):
             win.destroy()
             self._open_login()
 
-        ttk.Button(frm, text="Começar", command=seguir).pack(anchor="w", pady=(20, 0))
+        ttk.Button(frm, text="Começar", style="Acento.TButton",
+                   command=seguir).pack(anchor="w", pady=(20, 0))
         win.protocol("WM_DELETE_WINDOW", seguir)
 
     async def _connect(self):
@@ -660,7 +885,7 @@ class App(tk.Tk):
         frm.pack(fill="both", expand=True)
 
         ttk.Label(frm, text="Credenciais do Telegram",
-                  font=("Helvetica", 14, "bold")).pack(anchor="w")
+                  style="H2.TLabel").pack(anchor="w")
 
         api_id = tk.StringVar(value=str(self.cfg.get("api_id", "")))
         api_hash = tk.StringVar(value=self.cfg.get("api_hash", ""))
@@ -725,7 +950,8 @@ class App(tk.Tk):
             self.status_var.set("conectando...")
             self.runner.submit(self._connect(), self._after_connect, self)
 
-        ttk.Button(frm, text="Salvar e conectar", command=salvar).pack(pady=12)
+        ttk.Button(frm, text="Salvar e conectar", style="Acento.TButton",
+                   command=salvar).pack(pady=14)
 
     def _open_phone_dialog(self):
         win = tk.Toplevel(self)
@@ -802,7 +1028,8 @@ class App(tk.Tk):
 
             self.runner.submit(_signin(), done, self)
 
-        b = ttk.Button(frm, text="Entrar", command=entrar, state="disabled")
+        b = ttk.Button(frm, text="Entrar", style="Acento.TButton",
+                       command=entrar, state="disabled")
         b.pack(pady=14)
         btn_entrar_ref["b"] = b
 
@@ -837,7 +1064,9 @@ class App(tk.Tk):
         for i, (nome, kind, did, _ent) in enumerate(self.dialogs):
             if termo and termo not in nome.lower():
                 continue
-            self.tree_dialogs.insert("", "end", iid=str(i), values=(nome, kind, did))
+            self.tree_dialogs.insert("", "end", iid=str(i),
+                                     tags=("par",) if i % 2 else (),
+                                     values=(nome, kind, did))
 
     def use_manual(self):
         alvo = self.manual_var.get().strip()
@@ -948,14 +1177,14 @@ class App(tk.Tk):
             qtd_cat = sum(len(self.scan_index[e]) for e in exts)
             tot_cat = sum(i["size"] for e in exts for i in self.scan_index[e])
             no_cat = self.tree_ext.insert(
-                "", "end", iid=f"cat::{cat}",
+                "", "end", iid=f"cat::{cat}", tags=("cat",),
                 values=(cat, qtd_cat, human(tot_cat), tot_cat), open=False)
 
             for ext in exts:
                 itens = self.scan_index[ext]
                 tot = sum(i["size"] for i in itens)
                 no_ext = self.tree_ext.insert(
-                    no_cat, "end", iid=f"ext::{ext}",
+                    no_cat, "end", iid=f"ext::{ext}", tags=("ext",),
                     values=(f"    {ext}", len(itens), human(tot), tot))
                 # placeholder: faz aparecer a setinha; conteudo carrega ao abrir
                 self.tree_ext.insert(no_ext, "end",
@@ -987,13 +1216,18 @@ class App(tk.Tk):
         limite = 1500
         com_foto = {g for g, v in self._por_grupo.items()
                     if any(i.get("foto") for i in v)}
-        for it in itens[:limite]:
+        for n, it in enumerate(itens[:limite]):
             marca = "  (dup)" if it["dup"] else ""
             if it.get("grupo") in com_foto and not it.get("foto"):
                 marca += "  🖼"
             nome = it["name"] or f"(sem nome) msg {it['id']}"
+            tags = []
+            if n % 2:
+                tags.append("par")
+            if it["dup"]:
+                tags.append("dup")
             self.tree_ext.insert(
-                iid, "end", iid=f"file::{it['id']}",
+                iid, "end", iid=f"file::{it['id']}", tags=tuple(tags),
                 values=(f"        {nome}{marca}", "", human(it["size"]), it["size"]))
         if len(itens) > limite:
             self.tree_ext.insert(

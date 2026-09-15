@@ -8,7 +8,7 @@ pré-visualização das imagens antes de baixar.
 
 ## Instalação
 
-Descompacte o arquivo e mantenha todos os arquivos **na mesma pasta**.
+Baixe os arquivos e mantenha todos **na mesma pasta**.
 
 ### macOS
 

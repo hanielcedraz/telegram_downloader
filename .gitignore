@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Sessão e credenciais do Telegram — NUNCA versionar
+*.session
+*.session-journal
+config.json
+.tg_downloader/
+
+# Gerados pelo app
+.baixados_*.json
+thumbs/
+erros.log
+icone.iconset/
+*.icns
+*.ico
+
+# Sistema
+.DS_Store
+Thumbs.db

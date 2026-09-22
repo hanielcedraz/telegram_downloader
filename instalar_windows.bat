@@ -75,11 +75,15 @@ if not exist "%VENV%\Scripts\python.exe" (
 
 echo [3/5] Instalando bibliotecas...
 "%VENV%\Scripts\python.exe" -m pip install --quiet --upgrade pip
-"%VENV%\Scripts\python.exe" -m pip install --quiet telethon pillow pycryptodome
+"%VENV%\Scripts\python.exe" -m pip install --quiet telethon pillow
 if !errorlevel! neq 0 (
-    echo    aviso: tentando sem o acelerador opcional...
-    "%VENV%\Scripts\python.exe" -m pip install --quiet telethon pillow
+    echo ERRO ao instalar as bibliotecas obrigatorias.
+    pause
+    exit /b 1
 )
+REM cryptg acelera a criptografia ~900x (sem ele: ~0,4 MB/s)
+"%VENV%\Scripts\python.exe" -m pip install --quiet --only-binary cryptg cryptg
+if !errorlevel! neq 0 echo    aviso: cryptg indisponivel; downloads serao mais lentos.
 
 REM --- 4. copiar o script e gerar o icone -----------------------------------
 copy /Y "%ORIGEM%" "%BASE%\telegram_downloader.py" >nul
@@ -106,23 +110,32 @@ powershell -NoProfile -Command ^
   "  $s.Arguments = '\"%BASE%\telegram_downloader.py\"';" ^
   "  $s.WorkingDirectory = '%BASE%';" ^
   "  $s.Description = 'Baixa arquivos de grupos do Telegram';" ^
-  "  if (Test-Path '%ICONE%') { $s.IconLocation = '%ICONE%' }" ^
+  "  if (Test-Path '%ICONE%') { $s.IconLocation = '%ICONE%,0' }" ^
   "  $s.Save() }"
+
+REM faz o Windows reler os icones (senao o atalho pode mostrar o antigo)
+ie4uinit.exe -show >nul 2>&1
 
 echo.
 echo ===========================================
 echo   Pronto!
 echo.
-echo   Atalho criado na area de trabalho
-echo   e no menu Iniciar.
+echo   Atalhos criados na area de trabalho
+echo   e no menu Iniciar, com o icone do app.
 echo.
-echo   Abra com duplo clique. Na primeira vez o
-echo   app pede as credenciais e tem um botao
-echo   que leva direto a pagina onde obte-las.
+echo   PARA FIXAR NA BARRA DE TAREFAS:
+echo   1. Abra o app pelo atalho
+echo   2. Clique com o botao direito no icone
+echo      dele na barra de tarefas
+echo   3. Escolha "Fixar na barra de tarefas"
+echo.
+echo   (O Windows nao permite que instaladores
+echo   fixem sozinhos - e uma protecao do sistema.)
 echo ===========================================
 echo.
 
 choice /C SN /M "Abrir o aplicativo agora"
-if !errorlevel! equ 1 start "" "%VENV%\Scripts\pythonw.exe" "%BASE%\telegram_downloader.py"
+REM abre PELO ATALHO: assim, fixar a janela na barra fixa o atalho certo
+if !errorlevel! equ 1 start "" "%MENU%\%NOME%.lnk"
 
 endlocal

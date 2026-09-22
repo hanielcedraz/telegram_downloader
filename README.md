@@ -4,11 +4,19 @@ Aplicativo de desktop para baixar arquivos de grupos e canais do Telegram de
 forma organizada — com análise prévia de tamanho, seleção por categoria e
 pré-visualização das imagens antes de baixar.
 
+![Telegram Downloader](docs/captura.png)
+
 ---
 
 ## Instalação
 
-Descompacte o arquivo e mantenha todos os arquivos **na mesma pasta**.
+Clone o repositório (ou baixe pelo botão **Code → Download ZIP**) e mantenha
+todos os arquivos **na mesma pasta**.
+
+```bash
+git clone https://github.com/SEU_USUARIO/telegram-downloader.git
+cd telegram-downloader
+```
 
 ### macOS
 
@@ -19,8 +27,9 @@ chmod +x instalar_mac.sh
 ./instalar_mac.sh
 ```
 
-Ao final, um ícone aparece na área de trabalho e o app fica em
-`/Applications`. Abra com duplo clique.
+Ao final, um ícone aparece na área de trabalho, o app fica em
+`/Applications` e o instalador pergunta se você quer **adicioná-lo ao Dock**.
+Abra com duplo clique.
 
 Se o macOS reclamar que o app é de desenvolvedor não identificado, clique com o
 botão direito no ícone e escolha **Abrir** — só na primeira vez.
@@ -29,7 +38,13 @@ botão direito no ícone e escolha **Abrir** — só na primeira vez.
 
 Duplo clique em **`instalar_windows.bat`**.
 
-Ao final, atalhos aparecem na área de trabalho e no menu Iniciar.
+Ao final, atalhos com o ícone do app aparecem na área de trabalho e no menu
+Iniciar.
+
+**Para fixar na barra de tarefas:** abra o app pelo atalho, clique com o botão
+direito no ícone dele na barra de tarefas e escolha *Fixar na barra de tarefas*.
+O Windows não permite que instaladores façam isso sozinhos. Abra sempre pelo
+atalho antes de fixar — assim o Windows fixa o atalho certo.
 
 Se o Python não estiver instalado, o instalador abre a página de download.
 Ao instalar o Python, marque as duas opções:
@@ -161,7 +176,7 @@ novo.
 de salvamento de conteúdo. Não há como contornar pela API.
 
 **Downloads muito lentos** — instale o acelerador de criptografia:
-`pip install pycryptodome` no ambiente do app. O instalador já tenta fazer isso
+`pip install cryptg` no ambiente do app. O instalador já tenta fazer isso
 automaticamente.
 
 ---
@@ -170,7 +185,7 @@ automaticamente.
 
 Python 3.9 ou superior, com Tcl/Tk 8.6. Os instaladores cuidam disso.
 As bibliotecas usadas são `telethon` (obrigatória), `pillow` (miniaturas) e
-`pycryptodome` (opcional, acelera a criptografia).
+`cryptg` (opcional, mas sem ele o download fica ~900× mais lento).
 
 ---
 
@@ -185,3 +200,9 @@ autorais, redistribuído sem autorização do criador. Baixar para uso pessoal �
 uma coisa; revender peças impressas a partir de modelos pagos de terceiros, ou
 redistribuir os arquivos, é outra bem diferente. Vale conferir a licença do que
 for usado comercialmente.
+
+---
+
+## Licença
+
+MIT — veja [LICENSE](LICENSE).

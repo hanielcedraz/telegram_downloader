@@ -27,9 +27,9 @@ import sys
 # --------------------------------------------------------------------------
 # Bootstrap: garante as dependências antes de qualquer import pesado
 # --------------------------------------------------------------------------
-def _instalar(pacote: str) -> bool:
+def _instalar(pacote: str, extra=()) -> bool:
     """Tenta instalar um pacote via pip. Devolve True se deu certo."""
-    base = [sys.executable, "-m", "pip", "install", pacote]
+    base = [sys.executable, "-m", "pip", "install", pacote, *extra]
     # em ambiente gerenciado (Homebrew/Debian) o pip recusa sem --user
     tentativas = [base, base + ["--user"]]
     for cmd in tentativas:
@@ -40,7 +40,8 @@ def _instalar(pacote: str) -> bool:
     return False
 
 
-def _garantir(modulo: str, pacote: str = None, opcional: bool = False) -> bool:
+def _garantir(modulo: str, pacote: str = None, opcional: bool = False,
+              extra=()) -> bool:
     """Importa o módulo; se faltar, instala o pacote correspondente."""
     pacote = pacote or modulo
     if importlib.util.find_spec(modulo) is not None:
@@ -48,7 +49,7 @@ def _garantir(modulo: str, pacote: str = None, opcional: bool = False) -> bool:
 
     rotulo = "opcional" if opcional else "obrigatória"
     print(f"Dependência {rotulo} ausente: {pacote}. Instalando...")
-    if _instalar(pacote):
+    if _instalar(pacote, extra):
         if importlib.util.find_spec(modulo) is not None:
             print(f"✓ {pacote} instalado.\n")
             return True
@@ -113,33 +114,34 @@ def _checar_tkinter():
     sys.exit(1)
 
 
-def _bootstrap():
-    """Verifica dependências uma vez. Nada é instalado se já estiver presente."""
-    _checar_tkinter()
-
-    # obrigatória
-    _garantir("telethon", "telethon")
-
-    # opcional: acelera a criptografia. Se já houver qualquer uma das duas
-    # aceleradoras, ou se uma tentativa anterior falhou, não tenta de novo.
-    if any(importlib.util.find_spec(m) for m in ("cryptg", "Crypto")):
+def _opcional_uma_vez(modulo, pacote, motivo, extra=()):
+    """Tenta instalar um opcional; se falhar, registra e não insiste mais."""
+    if importlib.util.find_spec(modulo) is not None:
         return
     marcador = os.path.join(os.path.expanduser("~"), ".tg_downloader",
-                            ".sem_acelerador")
+                            f".sem_{pacote}")
     if os.path.exists(marcador):
         return
-    # Pillow: necessaria para exibir miniaturas JPEG na pre-visualizacao
-    _garantir("PIL", "pillow", opcional=True)
-
-    if not _garantir("Crypto", "pycryptodome", opcional=True):
+    if not _garantir(modulo, pacote, opcional=True, extra=extra):
         os.makedirs(os.path.dirname(marcador), exist_ok=True)
         with open(marcador, "w") as f:
-            f.write(
-                "Tentativa de instalar pycryptodome falhou neste ambiente.\n"
-                "O app funciona sem ele (mais lento em download em massa).\n"
-                "Apague este arquivo para tentar de novo.\n"
-            )
+            f.write(f"Não foi possível instalar {pacote} neste ambiente.\n"
+                    f"{motivo}\nApague este arquivo para tentar de novo.\n")
         print("  (registrado; não tentarei de novo nas próximas aberturas)\n")
+
+
+def _bootstrap():
+    """Verifica dependências. Nada é instalado se já estiver presente."""
+    _checar_tkinter()
+    _garantir("telethon", "telethon")                       # obrigatória
+    _opcional_uma_vez("PIL", "pillow",
+                      "Sem ele, a pré-visualização não mostra imagens.")
+    # cryptg é o ÚNICO acelerador que o Telethon usa (pycryptodome não serve).
+    # Sem ele a descriptografia roda em Python puro, ~900x mais lenta.
+    # --only-binary: só instala se houver versão pronta, nunca tenta compilar.
+    _opcional_uma_vez("cryptg", "cryptg",
+                      "Sem ele, downloads ficam MUITO lentos (Python puro).",
+                      extra=("--only-binary", "cryptg"))
 
 
 _bootstrap()
@@ -150,6 +152,7 @@ import json
 import queue
 import shutil
 import threading
+import time
 import tkinter as tk
 import webbrowser
 import difflib
@@ -305,6 +308,48 @@ def nome_de_pasta(nome: str) -> str:
     return limpo or "_sem-nome"
 
 
+_RESERVADOS_WIN = {"con", "prn", "aux", "nul",
+                   *(f"com{i}" for i in range(1, 10)),
+                   *(f"lpt{i}" for i in range(1, 10))}
+
+
+def nome_de_arquivo(nome, msg_id, ext=""):
+    """Nome válido em Windows, macOS e Linux; gera um se a mensagem não tiver."""
+    nome = (nome or "").strip()
+    if not nome:
+        nome = f"{msg_id}{ext or ''}"
+    nome = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", nome)
+    base, extensao = os.path.splitext(nome)
+    base = base.rstrip(" .") or str(msg_id)
+    if base.lower() in _RESERVADOS_WIN:
+        base = f"_{base}"
+    if len(base) > 150:                      # margem para caminhos longos
+        base = base[:150]
+    return base + extensao
+
+
+def caminho_livre(caminho: Path) -> Path:
+    """Se o arquivo já existe, devolve 'nome (1).ext', 'nome (2).ext'..."""
+    if not caminho.exists():
+        return caminho
+    n = 1
+    while True:
+        alt = caminho.with_name(f"{caminho.stem} ({n}){caminho.suffix}")
+        if not alt.exists():
+            return alt
+        n += 1
+
+
+def _duracao(seg: float) -> str:
+    seg = int(seg)
+    if seg < 60:
+        return f"{seg}s"
+    if seg < 3600:
+        return f"{seg // 60}min"
+    h, m = divmod(seg // 60, 60)
+    return f"{h}h{m:02d}"
+
+
 def agrupar_por_nome(itens, limiar=0.86):
     """Agrupa itens ({'name', 'ext'?, 'grupo'?, 'legenda'?}) em modelos.
 
@@ -453,6 +498,142 @@ def save_config(cfg: dict):
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
     os.chmod(CONFIG_FILE, 0o600)
 
+
+
+# --------------------------------------------------------------------------
+# Ícone do app (PNG embutido: barra de tarefas, Dock e janelas)
+# --------------------------------------------------------------------------
+ICONE_PNG = {
+    256: (
+        "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"
+        "AqNPaMXk/wFM1Imt4v665QAAAABJRU5ErkJggg=="
+    ),
+    48: (
+        "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAEC0lEQVR42u2aT2gUVxzHv+/tm7eZ"
+        "kGS35hBo7SEKBtKlsRQPGoo5lFAECdrN3ntoWasg9CQFTTRHPdiDJOCx1MpumiCBUrTCSk1yCGKi"
+        "60IMhkIMbSBNdrMhOzszO78e2lmXUOP+mcxmqL/bzr438/nu+/P7vt8sQ0n0x2K+eCRSAIDw8GQI"
+        "XEQtWD2GWehEHUIRvhQHT8AyR0bPdCe3MwIAewVPvniEFcLDkyESYlDXjdNNLQG2uZEh1DFsBimV"
+        "MWaag6NnupM2a1GAfeHzG7+d1MHu7AXw1woB9f109pMJm5nZQ2LDwwPxSkTMx0DEwiNTH+QtegIP"
+        "hZ+zD0ejx55xMEYkxGBTS4B5Bb6pJcBIiEEwRiw8PBny2q9fOgocXETh1eAiyi1YPV7lt2D18Hol"
+        "KSfCMAudHB4P4dSN1rZMnD3erkc+fn/H3Sz2aIluPvzd3+T3OZIoHR2BlgbFX04bvUCOZXlHBWxo"
+        "Rt71jcipG+V0c1faujoCdUkFbwW8FfA/FyA284WabXS1ScmJZ4t6gG/vX4uQqgXoBaLltFb8nM6Z"
+        "ZUFsaEY+nTP9gFYUr0pB0seYawIyOYOOHthH3QdbDfvalm75u/YH/QD0nfp27Q/6v/2sA42SF9tN"
+        "vvhLmV5cQ0BVmCsCVCmQ+iPLvz5+0N/R1myD6OX07Whr1jvamosVkfmVrPxxZolUWd1kYN1XE1bF"
+        "VQEfY5mcQQDw/RdHWImIimJ+JSvP3Z5FJmdQQFVYNSaPVzv/7eG+MP606oV8Yfwp1QIPAKJaY5UD"
+        "SJUCy2kNp0amlPHoMaOS/udjs2I5rUGVAvZoup7IcroJW8T52KyoBH56cY2pUtTsTGvOxLaI6cU1"
+        "dv3+8ze2v37/OZyCd8xK2CC3Zl4qsUdLtNNx8tbMS8XJM4HjXujavQX5y7M/5fbrD1+symv3FqQn"
+        "zNyliRTNr2Rl6Xb5TfzJrlS7d82NfvXD4yLwuduze7+s8l/r4tTIlGJbD88JAIBSs7cnBLwXbHDl"
+        "kFKJ8LIFHD2wj76LHDbdEGAnOscWcTpnsvbWRlfgAaC9tdEs93zBDYtS1VrZeoYqBQyLUoKABIAd"
+        "S+xBVdCDhVXl3aCquwH3YGFVBlXxxp2LgAQLXb7bJQV/XO5UckNAOfAAoJvWRwwAQkO/jgYaxGkn"
+        "a5a7PX0ymjmWvPhpmIOIwbKGvAJfNIKWNQQixvsjcZ4c6J3T8nqfFxazKgW0vN6XHOid64/E+b9/"
+        "NfjnbX3npZ9PvtPceMdJu+skOACsZ7f6UldOTNjMHADikUihPxbzpa6cmFjf1A5lNHOstNNeAM9o"
+        "5tj6pnaoFL5Y2rCj9IvQ5btd4OxLBvQonNXlTaZhUYqABCy6mRzondvOCAB/A/dd+/pn7gbJAAAA"
+        "AElFTkSuQmCC"
+    ),
+    32: (
+        "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAC70lEQVR42sVXTUwTQRT+Znd2muWn"
+        "NeABYxqiqDEh0XgigRAvHuqlB6AN3rhJ4oWeOVTixRt4MIHECyeTLRDBRIkxejAlHojKYe1BSiSk"
+        "IZrYtBQYuz8dT9tAbEt3KeWdZmfnfe97b2a+ySMAENE0ORGN2sNzySAhdEJAhA3T7kEDjSlymoCs"
+        "CGHNLD4c2HFiEmcwNJscMW1ore1+clDYEzgDc7AVGdGl8YGFiKbJBACGZpMjrMWfOKvAlYgYh3uR"
+        "pfGBBTI8lwwaFrZxDsYouiVC6ERru580O3hru58QQickARFuVumP2kFhTwiIMPVy2veLVsX5Nh91"
+        "hWOYdg/1wn7y/k2iyNKxOdMu4dmHTdeV9ETg7o2LRqX5V98y0naWy26wpEbuq9vgDSdQ63w0hIBb"
+        "8HOpgOtDWE9Wbq+Xm4rVhZw9NMENqy4yeW4iz02ojILJ5PQEDFugo0XB4K0ukuemEVAVVm3t4LXO"
+        "8ppPm39EJscRUJXaBAy7unY4GWQPTfRd6UR/TwcAGNXWx+5dNwAgtVsovtV/MZXRchKeDqHjyA0L"
+        "scSGSO0WTlS61G5BjM2vszw3TwwOANTZ21qmMgpuWJhc1tnzB3fIpYCvahUml3V21Kch15AbFlRG"
+        "kclxPHr5tWpKQ7OflUyO1x3clQ44gJkcR0zb+M8vpm1ImRw/tvbMhGhtKys/fv29/D39/gd7l/rt"
+        "SSyoVwVLfMmwm11+AMCL5E+0+ahoKoE2HxVP3qSIM/YsxbV+9l/tsAOqUspzUwqoSskNsOOT56a0"
+        "tpWVPRGYjt52gpY8JFf27Xv6sSoBySwhXUtUTvva1cIwS0hTAbGiMiVW6eqMza+zyxdU7Bct1y+i"
+        "4+NczUriZvw1V0hvfDXoY/RcGpOiYXVL+lRop2hZEefhaIapjKJoWRF9KrQjRTRN1uOhxfw+H1UZ"
+        "xVkScfDz+3xUj4cWy82p0yH3xleDhMoTBCSsSGhoe26WkBYQK8KyZ/SpULk9/wfJm2kFINGujgAA"
+        "AABJRU5ErkJggg=="
+    ),
+}
 
 
 # --------------------------------------------------------------------------
@@ -712,10 +893,17 @@ class AbaAnalise(ttk.Frame):
                                      style="Perigo.TButton",
                                      command=lambda: self.cancel_flag.set())
         self.btn_cancel.pack(side="left", padx=8)
-        self.progress = ttk.Progressbar(act, mode="determinate", length=380)
-        self.progress.pack(side="left", padx=12, fill="x", expand=True)
-        self.prog_label = ttk.Label(act, text="")
-        self.prog_label.pack(side="left")
+        barras = ttk.Frame(act)
+        barras.pack(side="left", padx=12, fill="x", expand=True)
+        linha = ttk.Frame(barras)
+        linha.pack(fill="x")
+        self.progress = ttk.Progressbar(linha, mode="determinate", length=380,
+                                        maximum=1000)
+        self.progress.pack(side="left", fill="x", expand=True)
+        self.prog_label = ttk.Label(linha, text="", width=12, anchor="e")
+        self.prog_label.pack(side="left", padx=(8, 0))
+        self.prog_info = ttk.Label(barras, text="", style="Suave.TLabel")
+        self.prog_info.pack(fill="x", pady=(4, 0))
 
         dest = ttk.Frame(tab)
         dest.pack(side="bottom", fill="x", pady=(10, 0))
@@ -1445,9 +1633,16 @@ class AbaAnalise(ttk.Frame):
         dest = Path(self.dest_var.get()).expanduser()
         dest.mkdir(parents=True, exist_ok=True)
 
+        aviso = ""
+        if getattr(self.app, "cripto_lenta", False):
+            horas = total_bytes / (0.4 * 1024 * 1024) / 3600
+            aviso = (f"\n\n⚠ A criptografia rápida (cryptg) não está instalada.\n"
+                     f"Nessa velocidade (~0,4 MB/s) isso levaria cerca de "
+                     f"{horas:.0f} h.\nVeja no log como instalar antes de continuar.")
         if not messagebox.askyesno(
             "Confirmar",
-            f"Baixar {len(alvo)} arquivos ({human(total_bytes)}) para:\n{dest}?",
+            f"Baixar {len(alvo)} arquivos ({human(total_bytes)}) para:\n{dest}?"
+            + aviso,
         ):
             return
 
@@ -1466,20 +1661,25 @@ class AbaAnalise(ttk.Frame):
         self._titulo("⬇ ")
         self.btn_download.configure(state="disabled")
         self.btn_cancel.configure(state="normal")
-        self.progress.configure(maximum=max(len(alvo), 1), value=0)
+        self.progress.configure(maximum=1000, value=0)
+        self.prog_info.configure(text="preparando...")
 
         async def _download():
             baixados = set(ja)
             feitos = 0
             pastas_criadas = set()
             ids = [i["id"] for i in alvo]
+            prog = {"total": sum(i["size"] for i in alvo) or 1, "concluido": 0,
+                    "inicio": time.monotonic(), "ultimo": 0.0}
+
+            class Cancelado(Exception):
+                pass
 
             for bloco in range(0, len(ids), 100):
                 if self.cancel_flag.is_set():
                     break
                 msgs = await self.client.get_messages(
-                    self.current_entity, ids=ids[bloco:bloco + 100]
-                )
+                    self.current_entity, ids=ids[bloco:bloco + 100])
                 for msg in msgs:
                     if self.cancel_flag.is_set():
                         break
@@ -1490,37 +1690,76 @@ class AbaAnalise(ttk.Frame):
                     modelo = self._grupos_nome[cid]["nome"] if cid is not None else None
                     sub = subpasta(modo_org, ext, msg.date, modelo)
                     pasta = dest / sub if sub else dest
-                    if sub and sub not in pastas_criadas:
+                    if sub not in pastas_criadas:
                         pasta.mkdir(parents=True, exist_ok=True)
                         pastas_criadas.add(sub)
 
-                    while True:
-                        try:
-                            caminho = await msg.download_media(file=str(pasta))
-                            break
-                        except FloodWaitError as e:
-                            self.logmsg(f"  flood wait: aguardando {e.seconds}s")
-                            await asyncio.sleep(e.seconds + 5)
-                        except ChatForwardsRestrictedError:
-                            self.logmsg("  grupo bloqueia salvamento de conteúdo.")
-                            caminho = None
-                            break
-                        except Exception as e:  # noqa: BLE001
-                            self.logmsg(f"  falha na msg {msg.id}: {e}")
-                            caminho = None
+                    tamanho = msg.file.size or 0
+                    nome = nome_de_arquivo(msg.file.name, msg.id, ext)
+                    final = pasta / nome
+                    # ja existe com o mesmo tamanho: baixado antes, pula
+                    if final.exists() and final.stat().st_size == tamanho:
+                        caminho = str(final)
+                        self._agendar(self._status_arquivo, feitos + 1, len(alvo),
+                                      nome, 1.0, tamanho, prog, True)
+                    else:
+                        final = caminho_livre(final)
+                        parcial = final.with_name(final.name + ".part")
+                        self._agendar(self._status_arquivo, feitos + 1, len(alvo),
+                                      nome, 0.0, tamanho, prog, False)
+
+                        def andamento(recebido, total, _n=nome, _t=tamanho,
+                                      _f=feitos):
+                            if self.cancel_flag.is_set():
+                                raise Cancelado()
+                            agora = time.monotonic()
+                            if agora - prog["ultimo"] < 0.25:     # no max 4x/s
+                                return
+                            prog["ultimo"] = agora
+                            prog["atual"] = recebido
+                            self._agendar(self._status_arquivo, _f + 1, len(alvo),
+                                          _n, recebido / (total or _t or 1), _t,
+                                          prog, False)
+
+                        caminho = None
+                        while True:
+                            try:
+                                await msg.download_media(file=str(parcial),
+                                                         progress_callback=andamento)
+                                os.replace(parcial, final)
+                                caminho = str(final)
+                                break
+                            except Cancelado:
+                                break
+                            except FloodWaitError as e:
+                                self.logmsg(f"  flood wait: aguardando {e.seconds}s")
+                                await asyncio.sleep(e.seconds + 5)
+                            except ChatForwardsRestrictedError:
+                                self.logmsg("  grupo bloqueia salvamento de conteúdo.")
+                                break
+                            except Exception as e:  # noqa: BLE001
+                                self.logmsg(f"  falha em {nome}: {e}")
+                                break
+                        if caminho is None:
+                            try:
+                                parcial.unlink()      # nao deixa arquivo pela metade
+                            except OSError:
+                                pass
+                        if self.cancel_flag.is_set():
                             break
 
+                    prog["concluido"] += tamanho
+                    prog["atual"] = 0
                     feitos += 1
                     if caminho:
                         baixados.add(msg.id)
-                    try:
-                        self.after(0, self._tick, feitos, len(alvo),
-                                   Path(caminho).name if caminho else "(pulado)")
-                    except (tk.TclError, RuntimeError):
-                        break                # aba fechada: encerra o download
+                    if not self._agendar(self._tick, feitos, len(alvo),
+                                         Path(caminho).name if caminho else "(pulado)",
+                                         prog):
+                        break                         # aba fechada
                     if feitos % 20 == 0:
                         state_file.write_text(json.dumps(sorted(baixados)))
-                    await asyncio.sleep(0.4)  # respiro anti flood
+                    await asyncio.sleep(0.4)          # respiro anti flood
 
             state_file.write_text(json.dumps(sorted(baixados)))
             return feitos
@@ -1537,22 +1776,53 @@ class AbaAnalise(ttk.Frame):
             else:
                 fim = "cancelado" if self.cancel_flag.is_set() else "concluído"
                 self.logmsg(f"Download {fim}: {res} arquivos processados.")
+                self.prog_info.configure(text=f"Download {fim} — {res} arquivos.")
+                if not self.cancel_flag.is_set():
+                    self.progress.configure(value=1000)
 
         self.logmsg(f"Iniciando download de {len(alvo)} arquivos para {dest} "
                     f"(organização: {modo_org})")
         self.runner.submit(_download(), done, self)
 
-    def _tick(self, feitos, total, nome):
-        self.progress.configure(value=feitos)
+    def _agendar(self, func, *args):
+        """Chama func na thread da interface. False se a aba já foi fechada."""
+        try:
+            self.after(0, func, *args)
+            return True
+        except (tk.TclError, RuntimeError):
+            return False
+
+    def _tick(self, feitos, total, nome, prog):
         self.prog_label.configure(text=f"{feitos}/{total}")
-        if feitos % 5 == 0 or feitos == total:
+        self.progress.configure(value=1000 * prog["concluido"] / prog["total"])
+        if feitos <= 3 or feitos % 10 == 0 or feitos == total:
             self.logmsg(f"  [{feitos}/{total}] {nome}")
+
+    def _status_arquivo(self, n, total, nome, fracao, tamanho, prog, pulado):
+        """Linha de detalhe: arquivo atual, %, velocidade e tempo restante."""
+        feito = prog["concluido"] + fracao * tamanho
+        self.progress.configure(value=1000 * feito / prog["total"])
+        self.prog_label.configure(text=f"{n - 1}/{total}")
+        decorrido = max(time.monotonic() - prog["inicio"], 0.001)
+        vel = feito / decorrido
+        falta = (prog["total"] - feito) / vel if vel > 0 else 0
+        curto = nome if len(nome) <= 42 else nome[:40] + "…"
+        if pulado:
+            txt = f"{curto}  ·  já existia, pulado"
+        else:
+            txt = (f"{curto}  ·  {fracao * 100:.0f}% de {human(tamanho)}"
+                   f"  ·  {human(vel)}/s  ·  faltam {_duracao(falta)}")
+        self.prog_info.configure(text=txt)
 
 
 
 class App(tk.Tk):
     def __init__(self):
+        # Obs. Windows: nao definimos AppUserModelID de proposito. Aberto pelo
+        # atalho, o Windows associa a janela a ele e "Fixar na barra de
+        # tarefas" fixa o proprio atalho (icone e argumentos corretos).
         super().__init__()
+        self._aplicar_icone()
         self.title("Telegram Downloader")
         self.geometry("1180x780")
         self.minsize(880, 620)
@@ -1569,6 +1839,7 @@ class App(tk.Tk):
 
         self._build_ui()
         self._drain_log()
+        self.cripto_lenta = self._verificar_cripto()
         self.after(300, self._auto_connect)
 
     # ---------------------------------------------------------------- UI
@@ -1683,9 +1954,56 @@ class App(tk.Tk):
         win.lift()
         win.focus_force()
 
+    def _aplicar_icone(self):
+        """Ícone da janela, da barra de tarefas (Windows) e do Dock (macOS)."""
+        try:
+            self._icones = [tk.PhotoImage(master=self, data=ICONE_PNG[t])
+                            for t in (256, 48, 32)]
+            # True: vale também para os diálogos (Toplevel) abertos depois
+            self.iconphoto(True, *self._icones)
+        except tk.TclError:
+            pass
+        # no Windows, o .ico gerado pelo instalador fica mais nítido
+        if platform.system() == "Windows":
+            for pasta in (Path(__file__).resolve().parent,
+                          Path(os.environ.get("LOCALAPPDATA", "")) / "TelegramDownloader"):
+                ico = pasta / "icone.ico"
+                if ico.exists():
+                    try:
+                        self.iconbitmap(default=str(ico))
+                    except tk.TclError:
+                        pass
+                    break
+
+    def _verificar_cripto(self):
+        """Informa qual criptografia o Telethon vai usar. Devolve True se lenta."""
+        try:
+            import cryptg  # noqa: F401
+            self.logmsg("Criptografia: cryptg (rápida).")
+            return False
+        except ImportError:
+            pass
+        try:
+            from telethon.crypto import libssl
+            if libssl.encrypt_ige and libssl.decrypt_ige:
+                self.logmsg("Criptografia: OpenSSL do sistema (rápida).")
+                return False
+        except Exception:  # noqa: BLE001
+            pass
+        self.logmsg("⚠ Criptografia em Python puro: downloads ficarão MUITO "
+                    "lentos (~0,4 MB/s). Para corrigir, feche o app e rode:")
+        self.logmsg(f'   "{sys.executable}" -m pip install cryptg')
+        marcador = APP_DIR / ".sem_cryptg"
+        if marcador.exists():
+            self.logmsg(f"   e apague {marcador} para o app tentar sozinho.")
+        return True
+
     def _desenhar_logo(self):
         """Miniatura do icone desenhada direto no canvas."""
         c, P = self.logo, PALETA
+        if getattr(self, "_icones", None):
+            c.create_image(17, 17, image=self._icones[2])   # o mesmo do app
+            return
         c.create_rectangle(1, 1, 33, 33, fill=P["acento"], outline="")
         c.create_rectangle(15, 8, 20, 19, fill="white", outline="")
         c.create_polygon(11, 17, 24, 17, 17.5, 25, fill="white", outline="")

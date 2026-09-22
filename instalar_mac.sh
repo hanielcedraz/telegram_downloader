@@ -69,9 +69,13 @@ if [ ! -x "$VENV/bin/python" ]; then
     "$PY" -m venv "$VENV"
 fi
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
-echo "[3/5] Instalando bibliotecas (telethon, pillow, pycryptodome)..."
-"$VENV/bin/python" -m pip install --quiet telethon pillow pycryptodome || \
-    "$VENV/bin/python" -m pip install --quiet telethon pillow
+echo "[3/5] Instalando bibliotecas (telethon, pillow, cryptg)..."
+"$VENV/bin/python" -m pip install --quiet --upgrade pip
+"$VENV/bin/python" -m pip install --quiet telethon pillow
+# cryptg acelera a criptografia ~900x. So instala se houver versao pronta
+# para esta maquina (--only-binary); sem ela o app funciona, mas lento.
+"$VENV/bin/python" -m pip install --quiet --only-binary cryptg cryptg || \
+    echo "      aviso: cryptg indisponivel aqui; downloads serao mais lentos."
 
 # --- 4. copiar o script -----------------------------------------------------
 cp "$SCRIPT_ORIGEM" "$BASE/telegram_downloader.py"
@@ -132,12 +136,38 @@ ln -s "$APP" "$DESKTOP/$NOME"
 xattr -cr "$APP" 2>/dev/null || true
 touch "$APP"
 
+# faz o macOS reler o icone (senao o Dock/Finder podem manter o generico)
+LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+[ -x "$LSREG" ] && "$LSREG" -f "$APP" >/dev/null 2>&1 || true
+
+# --- 8. Dock ----------------------------------------------------------------
+NO_DOCK="nao"
+if defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "$NOME.app"; then
+    NO_DOCK="ja estava"
+else
+    printf "\nAdicionar ao Dock para acesso rapido? [S/n] "
+    read -r RESP
+    case "$RESP" in
+        [nN]*) ;;
+        *)
+            defaults write com.apple.dock persistent-apps -array-add \
+"<dict><key>tile-data</key><dict><key>file-data</key><dict>\
+<key>_CFURLString</key><string>$APP</string>\
+<key>_CFURLStringType</key><integer>0</integer>\
+</dict></dict></dict>"
+            killall Dock 2>/dev/null || true
+            NO_DOCK="sim"
+            ;;
+    esac
+fi
+
 echo ""
 echo "==========================================="
 echo "  Pronto!"
 echo ""
 echo "  Aplicativo:  $APP"
 echo "  Atalho:      $DESKTOP/$NOME"
+echo "  No Dock:     $NO_DOCK"
 echo ""
 echo "  Abra com duplo clique. Na primeira vez o app"
 echo "  pede as credenciais e tem um botao que leva"

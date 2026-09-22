@@ -8,7 +8,7 @@ pré-visualização das imagens antes de baixar.
 
 ## Instalação
 
-Baixe os arquivos e mantenha todos **na mesma pasta**.
+Descompacte o arquivo e mantenha todos os arquivos **na mesma pasta**.
 
 ### macOS
 
@@ -70,8 +70,15 @@ esse passo só acontece uma vez.
 **1. Grupos** — clique em *Carregar grupos* para listar tudo que você
 participa. Também dá para colar um `@username` ou link e clicar em *Usar*.
 
-**2. Análise** — o app percorre o histórico lendo apenas metadados; nenhum
-arquivo é baixado nessa etapa. O resultado é uma árvore:
+**2. Análise** — cada grupo analisado abre numa **aba própria**, com seus
+próprios dados, seleção e download. Dá para analisar vários grupos ao mesmo
+tempo e alternar entre eles para comparar; o título da aba mostra ⏳ enquanto
+analisa, ⬇ enquanto baixa e o tamanho total ao terminar. Feche pelo **×** da
+aba ou com Cmd+W / Ctrl+W. Selecionar vários grupos na lista e clicar em
+*Analisar* abre todos de uma vez.
+
+A análise percorre o histórico lendo apenas metadados; nenhum arquivo é
+baixado nessa etapa. O resultado é uma árvore:
 
 ```
 ▸ modelos-3d          1.240   14.2 GB
@@ -86,6 +93,11 @@ Selecione em qualquer nível — uma categoria inteira, um tipo de arquivo, ou
 itens avulsos com Ctrl/Cmd+clique. O rótulo mostra em tempo real quantos
 arquivos e quantos GB a seleção representa, e o espaço livre no disco aparece
 ao lado do campo de destino.
+
+A lista pode ser vista **por categoria** ou **por modelo (nome parecido)**,
+que junta versões e partes do mesmo modelo (`suporte_v2.stl`,
+`suporte_final.3mf`, a foto do post) num só item. O campo *Buscar* filtra
+por nome, sem precisar de acentos.
 
 **3. Pré-visualização** — clicando num arquivo, o painel à direita mostra a
 foto publicada no mesmo post, com legenda e data. O ícone 🖼 na lista indica

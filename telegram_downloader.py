@@ -152,7 +152,10 @@ import shutil
 import threading
 import tkinter as tk
 import webbrowser
-from collections import defaultdict
+import difflib
+import re
+import unicodedata
+from collections import Counter, defaultdict
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -209,6 +212,7 @@ MODOS_ORG = (
     "Extensão",
     "Ano-mês",
     "Ano-mês / categoria",
+    "Modelo (nome parecido)",
 )
 
 
@@ -217,8 +221,10 @@ def categoria_de(ext: str) -> str:
     return _EXT2CAT.get((ext or "").lower(), "outros")
 
 
-def subpasta(modo: str, ext: str, data=None) -> str:
+def subpasta(modo: str, ext: str, data=None, modelo=None) -> str:
     """Caminho relativo onde o arquivo deve ser salvo, conforme o modo."""
+    if modo.startswith("Modelo"):
+        return nome_de_pasta(modelo) if modelo else "_sem-nome"
     ext = (ext or "").lower()
     limpa = ext.lstrip(".") or "sem-extensao"
     cat = categoria_de(ext)
@@ -235,6 +241,160 @@ def subpasta(modo: str, ext: str, data=None) -> str:
     if modo == "Ano-mês / categoria":
         return os.path.join(ym, cat)
     return ""  # Pasta única
+
+
+
+# --------------------------------------------------------------------------
+# Agrupamento por nome parecido
+# --------------------------------------------------------------------------
+# palavras que nao identificam o modelo: removidas em qualquer posicao
+_RUIDO = {
+    "v", "ver", "version", "versao", "final", "fixed", "fix", "rev", "copy",
+    "copia", "part", "parte", "parts", "pt", "plate", "print", "printable",
+    "remix", "remixed", "resized", "scaled", "scale", "new", "novo", "old",
+    "updated", "test", "teste", "sample", "preview", "render", "mm", "cm",
+    "pla", "petg", "abs", "asa", "tpu", "a1", "a1mini", "mini", "p1s", "p1p",
+    "x1", "x1c", "ams", "bambu", "bambulab", "nozzle", "multicolor", "color",
+    "cor", "stl", "3mf", "obj", "step", "gcode", "file", "arquivo", "modelo",
+    "model", "the", "by", "and", "e", "de", "do", "da", "dos", "das", "for",
+    "with", "com", "sem", "no", "na", "of",
+    # nomes genericos de camera/app, que nao identificam o modelo
+    "img", "image", "imagem", "photo", "foto", "pic", "screenshot", "dsc",
+    "pxl", "whatsapp", "telegram", "download", "untitled",
+}
+# partes de um mesmo modelo: removidas so no fim do nome
+_PARTES = {
+    "lid", "tampa", "base", "top", "bottom", "body", "corpo", "left", "right",
+    "esquerda", "direita", "esq", "dir", "l", "r", "a", "b", "c", "d", "front",
+    "back", "frente", "tras", "inner", "outer", "insert", "cap", "half",
+    "metade", "side", "lado", "upper", "lower", "main", "principal",
+}
+_PADROES_RUIDO = re.compile(
+    r"^(\d+|v\d+.*|rev\d+|ver\d+|part\d+|parte\d+|pt\d+|plate\d+|"
+    r"\d+(x\d+)+|\d+mm|\d+cm|\d+x|x\d+|\d+pc?s?|\d+[a-z])$")
+
+
+def _sem_acento(txt: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", txt)
+                   if not unicodedata.combining(c))
+
+
+def chave_nome(nome: str) -> str:
+    """Reduz um nome de arquivo ao que identifica o modelo.
+
+    'SuporteBancada_v2_part3 (1).stl' -> 'suporte bancada'
+    """
+    if not nome:
+        return ""
+    base = os.path.splitext(nome)[0]
+    base = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", base)      # camelCase
+    base = _sem_acento(base).lower()
+    base = re.sub(r"\(\d+\)|\[\d+\]", " ", base)          # (1) [2]
+    tokens = re.split(r"[^a-z0-9]+", base)
+    tokens = [t for t in tokens
+              if t and t not in _RUIDO and not _PADROES_RUIDO.match(t)]
+    while len(tokens) > 1 and tokens[-1] in _PARTES:
+        tokens.pop()
+    chave = " ".join(tokens)
+    return chave if len(chave) >= 3 else ""
+
+
+def nome_de_pasta(nome: str) -> str:
+    limpo = re.sub(r'[\\/:*?"<>|]+', " ", nome or "").strip()
+    limpo = re.sub(r"\s+", " ", limpo)[:60].strip()
+    return limpo or "_sem-nome"
+
+
+def agrupar_por_nome(itens, limiar=0.86):
+    """Agrupa itens ({'name', 'ext'?, 'grupo'?, 'legenda'?}) em modelos.
+
+    Criterios, combinados:
+      1. mesma chave de nome
+      2. chaves muito parecidas (difflib, comparando so vizinhos proximos)
+      3. mesmo post do Telegram (grouped_id) - leva fotos sem nome junto
+    Devolve (rotulo_por_indice, nome_por_rotulo).
+    """
+    n = len(itens)
+    pai = list(range(n))
+
+    def achar(i):
+        while pai[i] != i:
+            pai[i] = pai[pai[i]]
+            i = pai[i]
+        return i
+
+    def unir(a, b):
+        ra, rb = achar(a), achar(b)
+        if ra != rb:
+            pai[rb] = ra
+
+    chaves = [chave_nome(it.get("name") or "") for it in itens]
+
+    # 1. chave identica
+    primeiro = {}
+    for i, k in enumerate(chaves):
+        if not k:
+            continue
+        if k in primeiro:
+            unir(i, primeiro[k])
+        else:
+            primeiro[k] = i
+
+    # 2. chaves parecidas: blocos pelas 3 primeiras letras, ordenados, e cada
+    #    chave comparada so com os ultimos representantes (vizinhos na ordem)
+    blocos = defaultdict(list)
+    for k in primeiro:
+        blocos[k[:3]].append(k)
+    for ks in blocos.values():
+        if len(ks) < 2:
+            continue
+        ks.sort()
+        reps = []
+        for k in ks:
+            for r in reps[-12:]:
+                # filtro barato por tamanho antes do calculo completo
+                if abs(len(k) - len(r)) > max(len(k), len(r)) * (1 - limiar) + 1:
+                    continue
+                sm = difflib.SequenceMatcher(None, k, r)
+                if sm.quick_ratio() >= limiar and sm.ratio() >= limiar:
+                    unir(primeiro[k], primeiro[r])
+                    break
+            else:
+                reps.append(k)
+
+    # 3. mesmo post
+    por_post = {}
+    for i, it in enumerate(itens):
+        g = it.get("grupo")
+        if not g:
+            continue
+        if g in por_post:
+            unir(i, por_post[g])
+        else:
+            por_post[g] = i
+
+    # monta os grupos e escolhe um nome para cada
+    membros = defaultdict(list)
+    for i in range(n):
+        membros[achar(i)].append(i)
+
+    rotulo, nomes = {}, {}
+    for cid, idxs in enumerate(membros.values()):
+        cont = Counter()
+        for i in idxs:
+            rotulo[i] = cid
+            if chaves[i]:
+                ext = itens[i].get("ext") or os.path.splitext(
+                    itens[i].get("name") or "")[1]
+                cont[chaves[i]] += 3 if categoria_de(ext) == "modelos-3d" else 1
+        if cont:
+            nome = cont.most_common(1)[0][0].title()
+        else:
+            leg = next((itens[i].get("legenda") for i in idxs
+                        if itens[i].get("legenda")), "")
+            nome = leg.splitlines()[0][:50].strip() if leg else ""
+        nomes[cid] = nome or "(sem nome)"
+    return rotulo, nomes
 
 
 # --------------------------------------------------------------------------
@@ -261,7 +421,10 @@ class AsyncRunner:
                 except Exception as e:  # noqa: BLE001
                     res, err = None, e
                 if tk_root:
-                    tk_root.after(0, callback, res, err)
+                    try:
+                        tk_root.after(0, callback, res, err)
+                    except (tk.TclError, RuntimeError):
+                        pass                 # janela/aba ja foi fechada
                 else:
                     callback(res, err)
 
@@ -463,202 +626,68 @@ def aplicar_tema(root):
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Telegram Group Downloader")
-        self.geometry("1000x720")
-        self.minsize(880, 620)
+class AbaAnalise(ttk.Frame):
+    """Uma aba de análise: dados, árvore, pré-visualização e download de um
+    único grupo. Cada aba é independente, então várias podem rodar juntas."""
 
-        self.runner = AsyncRunner()
-        self.client = None
-        self.cfg = load_config()
+    def __init__(self, parent, app, entity, nome):
+        super().__init__(parent, padding=10)
+        self.app = app
+        self.nome = nome
+        self.current_entity = entity
 
-        self.dialogs = []          # lista de (nome, entity)
         self.scan_index = {}       # ext -> lista de dicts {id, size, name}
         self._por_cat = {}         # categoria -> lista de extensoes
         self._por_id = {}          # msg id -> item
         self._por_grupo = {}       # grouped_id -> itens do mesmo post
+        self._grupos_nome = {}     # id do modelo -> {nome, itens, busca}
+        self._grupo_de_id = {}     # msg id -> id do modelo
         self._thumb_atual = None   # referencia viva da imagem no Tk
         self._item_prev = None
         self._fotos_prev = []
         self._idx_prev = 0
-        self.current_entity = None
+        self._busca_job = None
         self.cancel_flag = threading.Event()
-        self.log_queue = queue.Queue()
+        self.baixando = False
+        self.analisando = False
 
-        self.dest_var = tk.StringVar(value=str(Path.home() / "Downloads" / "telegram"))
-        self.status_var = tk.StringVar(value="Desconectado")
-        self.dedup_var = tk.BooleanVar(value=True)
-        self.resume_var = tk.BooleanVar(value=True)
-        self.limit_var = tk.StringVar(value="0")
-        self.org_var = tk.StringVar(value="Categoria")
-        self.filter_var = tk.StringVar()
+        pasta = Path.home() / "Downloads" / "telegram" / nome_de_pasta(nome)
+        self.dest_var = tk.StringVar(self, value=str(pasta))
+        self.dedup_var = tk.BooleanVar(self, value=True)
+        self.resume_var = tk.BooleanVar(self, value=True)
+        self.limit_var = tk.StringVar(self, value="0")
+        self.org_var = tk.StringVar(self, value="Categoria")
+        self.vis_var = tk.StringVar(self, value="Categoria / tipo")
+        self.busca_var = tk.StringVar(self)
 
-        self._build_ui()
+        self._montar()
+        self.grupo_label.configure(text=nome)
         self._preview_org()
-        self._drain_log()
-        self.after(300, self._auto_connect)
 
-    # ---------------------------------------------------------------- UI
-    def _build_ui(self):
-        P = PALETA
-        self.F = aplicar_tema(self)
+    # recursos compartilhados vem da janela principal
+    client = property(lambda self: self.app.client)
+    runner = property(lambda self: self.app.runner)
+    F = property(lambda self: self.app.F)
 
-        # ---- cabeçalho
-        topo = tk.Frame(self, bg=P["cartao"], height=64)
-        topo.pack(fill="x")
-        topo.pack_propagate(False)
-        tk.Frame(self, bg=P["borda"], height=1).pack(fill="x")
+    def logmsg(self, txt):
+        curto = self.nome if len(self.nome) <= 22 else self.nome[:21] + "…"
+        self.app.logmsg(f"[{curto}] {txt}")
 
-        marca = tk.Frame(topo, bg=P["cartao"])
-        marca.pack(side="left", padx=18)
-        self.logo = tk.Canvas(marca, width=34, height=34, bg=P["cartao"],
-                              highlightthickness=0)
-        self.logo.pack(side="left", pady=15)
-        self._desenhar_logo()
-        textos = tk.Frame(marca, bg=P["cartao"])
-        textos.pack(side="left", padx=10)
-        tk.Label(textos, text="Telegram Downloader", bg=P["cartao"],
-                 fg=P["texto"], font=self.F["h3"]).pack(anchor="w")
-        tk.Label(textos, text="baixe arquivos de grupos com organização",
-                 bg=P["cartao"], fg=P["suave"], font=self.F["peq"]).pack(anchor="w")
-
-        direita = tk.Frame(topo, bg=P["cartao"])
-        direita.pack(side="right", padx=18)
-        self.btn_login = ttk.Button(direita, text="Conectar",
-                                    style="Plano.TButton", command=self._open_login)
-        self.btn_login.pack(side="right", pady=16)
-        self.pill = tk.Label(direita, textvariable=self.status_var,
-                             bg="#f0f2f5", fg=P["suave"], font=self.F["peq"],
-                             padx=12, pady=5)
-        self.pill.pack(side="right", padx=12, pady=16)
-        self.status_var.trace_add("write", lambda *_a: self._pintar_pill())
-
-        outer = ttk.Frame(self, padding=14)
-        outer.pack(fill="both", expand=True)
-
-        # divisor arrastável entre as abas e o log
-        paned = ttk.PanedWindow(outer, orient="vertical")
-        paned.pack(fill="both", expand=True)
-
-        nb_frame = ttk.Frame(paned)
-        nb_frame.configure(height=380)
-        self.nb = ttk.Notebook(nb_frame)
-        self.nb.pack(fill="both", expand=True)
-        paned.add(nb_frame, weight=4)
-        # impede que a divisória seja arrastada a ponto de sumir com as abas
-        paned.bind("<B1-Motion>", self._limitar_divisoria, add="+")
-        paned.bind("<ButtonRelease-1>", self._limitar_divisoria, add="+")
-        self._paned = paned
-
-        self._build_tab_grupos()
-        self._build_tab_analise()
-
-        # --- log (arraste a divisória acima para aumentar)
-        log_frame = ttk.Frame(paned)
-        cab = ttk.Frame(log_frame)
-        cab.pack(fill="x", pady=(8, 2))
-        ttk.Label(cab, text="Atividade", style="H3.TLabel").pack(side="left")
-        ttk.Label(cab, text="arraste a divisória acima para ampliar",
-                  style="Suave.TLabel").pack(side="left", padx=10)
-        ttk.Button(cab, text="Limpar", style="Plano.TButton",
-                   command=self._clear_log).pack(side="right")
-
-        caixa = ttk.Frame(log_frame)
-        caixa.pack(fill="both", expand=True)
-        self.log = tk.Text(caixa, height=8, wrap="word", font=self.F["mono"],
-                           bg=PALETA["log_fundo"], fg=PALETA["log_texto"],
-                           insertbackground=PALETA["log_texto"],
-                           relief="flat", padx=12, pady=10,
-                           selectbackground=PALETA["acento"])
-        barra = ttk.Scrollbar(caixa, orient="vertical", command=self.log.yview)
-        self.log.configure(yscrollcommand=barra.set)
-        barra.pack(side="right", fill="y")
-        self.log.pack(side="left", fill="both", expand=True)
-        self.log.configure(state="disabled")
-        paned.add(log_frame, weight=1)
-
-    def _limitar_divisoria(self, _evt=None):
-        """Garante uma altura minima para as abas."""
+    def _titulo(self, prefixo="", sufixo=""):
+        """Texto da aba: nome + estado (analisando, baixando, tamanho)."""
+        nome = self.nome if len(self.nome) <= 26 else self.nome[:25] + "…"
         try:
-            pos = self._paned.sashpos(0)
-        except Exception:  # noqa: BLE001
-            return
-        if pos < 320:
-            self._paned.sashpos(0, 320)
+            self.app.nb.tab(self, text=f"{prefixo}{nome}{sufixo}  ")
+        except tk.TclError:
+            pass
 
-    def _desenhar_logo(self):
-        """Miniatura do icone desenhada direto no canvas."""
-        c, P = self.logo, PALETA
-        c.create_rectangle(1, 1, 33, 33, fill=P["acento"], outline="")
-        c.create_rectangle(15, 8, 20, 19, fill="white", outline="")
-        c.create_polygon(11, 17, 24, 17, 17.5, 25, fill="white", outline="")
-        c.create_rectangle(9, 27, 26, 29, fill="white", outline="")
-
-    def _pintar_pill(self):
-        """Colore a etiqueta de status conforme o estado."""
-        txt = self.status_var.get().lower()
-        P = PALETA
-        if "conectado" in txt:
-            fundo, frente = "#e6f4ec", P["ok"]
-        elif "erro" in txt or "não" in txt or "nao" in txt:
-            fundo, frente = "#fbeae8", P["alerta"]
-        elif "conectando" in txt:
-            fundo, frente = P["acento_luz"], P["acento"]
-        else:
-            fundo, frente = "#f0f2f5", P["suave"]
-        self.pill.configure(bg=fundo, fg=frente)
-
-    def _clear_log(self):
-        self.log.configure(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
-
-    def _build_tab_grupos(self):
-        tab = ttk.Frame(self.nb, padding=10)
-        self.nb.add(tab, text="1. Grupos")
-
-        bar = ttk.Frame(tab)
-        bar.pack(fill="x", pady=(0, 8))
-        ttk.Button(bar, text="Carregar grupos", style="Acento.TButton",
-                   command=self.load_dialogs).pack(side="left")
-        ttk.Label(bar, text="Filtrar:").pack(side="left", padx=(16, 4))
-        ent = ttk.Entry(bar, textvariable=self.filter_var, width=30)
-        ent.pack(side="left")
-        ent.bind("<KeyRelease>", lambda _e: self._render_dialogs())
-
-        ttk.Label(bar, text="ou @username / link:").pack(side="left", padx=(16, 4))
-        self.manual_var = tk.StringVar()
-        ttk.Entry(bar, textvariable=self.manual_var, width=24).pack(side="left")
-        ttk.Button(bar, text="Usar", command=self.use_manual).pack(side="left", padx=4)
-
-        # empacotado ANTES da tabela para nunca ser espremido para fora
-        rodape = ttk.Frame(tab)
-        rodape.pack(side="bottom", fill="x", pady=(8, 0))
-        ttk.Button(rodape, text="Analisar grupo selecionado  →",
-                   style="Acento.TButton",
-                   command=self.analyze_selected).pack(side="right")
-
-        corpo = ttk.Frame(tab)
-        corpo.pack(side="top", fill="both", expand=True)
-        cols = ("nome", "tipo", "id")
-        self.tree_dialogs = ttk.Treeview(corpo, columns=cols, show="headings", height=8)
-        rol_d = ttk.Scrollbar(corpo, orient="vertical",
-                              command=self.tree_dialogs.yview)
-        self.tree_dialogs.configure(yscrollcommand=rol_d.set)
-        for c, w in zip(cols, (520, 120, 160)):
-            self.tree_dialogs.heading(c, text=c.capitalize())
-            self.tree_dialogs.column(c, width=w, anchor="w")
-        rol_d.pack(side="right", fill="y")
-        self.tree_dialogs.pack(side="left", fill="both", expand=True)
-        self.tree_dialogs.bind("<Double-1>", lambda _e: self.analyze_selected())
-        self.tree_dialogs.tag_configure("par", background=PALETA["listra"])
+    def _titulo_final(self):
+        total = sum(i["size"] for v in self.scan_index.values() for i in v)
+        self._titulo(sufixo=f"  ·  {human(total)}" if total else "")
 
 
-    def _build_tab_analise(self):
-        tab = ttk.Frame(self.nb, padding=10)
-        self.nb.add(tab, text="2. Análise e download")
+    def _montar(self):
+        tab = self
 
         head = ttk.Frame(tab)
         head.pack(side="top", fill="x", pady=(0, 8))
@@ -731,6 +760,21 @@ class App(tk.Tk):
         self.sel_label.pack(side="left", padx=16)
 
         # ---- corpo: arvore a esquerda, pre-visualizacao a direita
+        vis = ttk.Frame(tab)
+        vis.pack(side="top", fill="x", pady=(0, 8))
+        ttk.Label(vis, text="Mostrar lista por:").pack(side="left")
+        combo_vis = ttk.Combobox(vis, textvariable=self.vis_var, state="readonly",
+                                 width=24, values=("Categoria / tipo",
+                                                   "Modelo (nome parecido)"))
+        combo_vis.pack(side="left", padx=(6, 18))
+        combo_vis.bind("<<ComboboxSelected>>", lambda _e: self._trocar_visao())
+        ttk.Label(vis, text="Buscar:").pack(side="left")
+        self.ent_busca = ttk.Entry(vis, textvariable=self.busca_var, width=28)
+        self.ent_busca.pack(side="left", padx=6)
+        self.busca_var.trace_add("write", lambda *_a: self._agendar_busca())
+        self.vis_info = ttk.Label(vis, text="", style="Suave.TLabel")
+        self.vis_info.pack(side="left", padx=12)
+
         split = ttk.PanedWindow(tab, orient="horizontal")
         split.pack(side="top", fill="both", expand=True)
 
@@ -801,303 +845,6 @@ class App(tk.Tk):
 
 
     # ------------------------------------------------------------- log
-    def logmsg(self, txt):
-        self.log_queue.put(txt)
-
-    def _drain_log(self):
-        while not self.log_queue.empty():
-            txt = self.log_queue.get()
-            self.log.configure(state="normal")
-            self.log.insert("end", txt + "\n")
-            self.log.see("end")
-            self.log.configure(state="disabled")
-        self.after(150, self._drain_log)
-
-    # ----------------------------------------------------------- login
-    def _auto_connect(self):
-        if self.cfg.get("api_id") and self.cfg.get("api_hash"):
-            self.status_var.set("conectando...")
-            self.runner.submit(self._connect(), self._after_connect, self)
-        else:
-            self._boas_vindas()
-
-    def _boas_vindas(self):
-        """Primeira execucao: explica em uma tela o que vai acontecer."""
-        win = tk.Toplevel(self)
-        win.title("Bem-vindo")
-        win.geometry("540x380")
-        win.transient(self)
-        frm = ttk.Frame(win, padding=24)
-        frm.pack(fill="both", expand=True)
-
-        ttk.Label(frm, text="Telegram Downloader",
-                  style="H1.TLabel").pack(anchor="w")
-        ttk.Label(frm, text="Baixe arquivos de grupos e canais de forma organizada",
-                  style="Suave.TLabel").pack(anchor="w", pady=(2, 18))
-
-        passos = (
-            "Como funciona:\n\n"
-            "1.  Você conecta sua conta do Telegram (uma única vez)\n"
-            "2.  Escolhe um grupo ou canal da sua lista\n"
-            "3.  O app analisa e mostra quantos arquivos e quantos GB existem,\n"
-            "     separados por categoria\n"
-            "4.  Você seleciona o que quer — categorias inteiras ou arquivos\n"
-            "     avulsos, vendo a foto de cada modelo antes de decidir\n"
-            "5.  Baixa, com as pastas já organizadas\n\n"
-            "Para conectar, você precisa de duas credenciais gratuitas do\n"
-            "Telegram. A próxima tela explica como obtê-las em 2 minutos."
-        )
-        ttk.Label(frm, text=passos, justify="left", foreground="#333").pack(anchor="w")
-
-        def seguir():
-            win.destroy()
-            self._open_login()
-
-        ttk.Button(frm, text="Começar", style="Acento.TButton",
-                   command=seguir).pack(anchor="w", pady=(20, 0))
-        win.protocol("WM_DELETE_WINDOW", seguir)
-
-    async def _connect(self):
-        self.client = TelegramClient(SESSION, int(self.cfg["api_id"]),
-                                     self.cfg["api_hash"])
-        await self.client.connect()
-        return await self.client.is_user_authorized()
-
-    def _after_connect(self, authorized, err):
-        if err:
-            self.status_var.set("erro de conexão")
-            self.logmsg(f"Erro ao conectar: {err}")
-            return
-        if authorized:
-            self.status_var.set("conectado")
-            self.btn_login.configure(text="Reconectar")
-            self.logmsg("Conectado. Vá para a aba '1. Grupos' e clique em "
-                        "'Carregar grupos'.")
-        else:
-            self.status_var.set("não autenticado")
-            self._open_phone_dialog()
-
-    def _open_login(self):
-        win = tk.Toplevel(self)
-        win.title("Credenciais da API")
-        win.geometry("540x470")
-        frm = ttk.Frame(win, padding=16)
-        frm.pack(fill="both", expand=True)
-
-        ttk.Label(frm, text="Credenciais do Telegram",
-                  style="H2.TLabel").pack(anchor="w")
-
-        api_id = tk.StringVar(value=str(self.cfg.get("api_id", "")))
-        api_hash = tk.StringVar(value=self.cfg.get("api_hash", ""))
-
-        campos = ttk.Frame(frm)
-        campos.pack(fill="x", pady=(12, 6))
-        for label, var in (("api_id", api_id), ("api_hash", api_hash)):
-            row = ttk.Frame(campos)
-            row.pack(fill="x", pady=4)
-            ttk.Label(row, text=label, width=10).pack(side="left")
-            ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
-
-        # --- ajuda para quem ainda não tem credenciais
-        ajuda = ttk.LabelFrame(frm, text="Ainda não tenho essas credenciais",
-                               padding=12)
-        ajuda.pack(fill="both", expand=True, pady=(14, 0))
-
-        passos = (
-            "São gratuitas, levam 2 minutos e ficam vinculadas à sua conta.\n\n"
-            "1. Clique no botão abaixo para abrir my.telegram.org\n"
-            "2. Informe seu telefone (+55...); o código chega no app do Telegram\n"
-            "3. Entre em 'API development tools'\n"
-            "4. Preencha App title e Short name (qualquer nome serve) e\n"
-            "     escolha a plataforma Desktop; URL e descrição podem ficar vazias\n"
-            "5. Clique em 'Create application'\n"
-            "6. Copie App api_id e App api_hash para os campos acima"
-        )
-        ttk.Label(ajuda, text=passos, justify="left", wraplength=460,
-                  foreground="#444").pack(anchor="w")
-
-        linha_botoes = ttk.Frame(ajuda)
-        linha_botoes.pack(anchor="w", pady=(10, 0))
-        ttk.Button(linha_botoes, text="Abrir my.telegram.org",
-                   command=lambda: webbrowser.open(
-                       "https://my.telegram.org/auth?to=apps")).pack(side="left")
-        ttk.Label(linha_botoes, text="não compartilhe essas credenciais",
-                  foreground="#a33").pack(side="left", padx=10)
-
-        def salvar():
-            bruto = api_id.get().strip()
-            h = api_hash.get().strip()
-            if not bruto or not h:
-                messagebox.showerror(
-                    "Erro",
-                    "Preencha api_id e api_hash. Use o botão acima se ainda "
-                    "não os tiver.", parent=win)
-                return
-            try:
-                self.cfg["api_id"] = int(bruto)
-            except ValueError:
-                messagebox.showerror("Erro", "api_id deve ser numérico "
-                                             "(apenas dígitos).", parent=win)
-                return
-            if len(h) != 32 and not messagebox.askyesno(
-                "Confirmar",
-                f"O api_hash costuma ter 32 caracteres; o informado tem "
-                f"{len(h)}. Continuar mesmo assim?", parent=win):
-                return
-            self.cfg["api_hash"] = h
-            save_config(self.cfg)
-            win.destroy()
-            self.status_var.set("conectando...")
-            self.runner.submit(self._connect(), self._after_connect, self)
-
-        ttk.Button(frm, text="Salvar e conectar", style="Acento.TButton",
-                   command=salvar).pack(pady=14)
-
-    def _open_phone_dialog(self):
-        win = tk.Toplevel(self)
-        win.title("Login")
-        win.geometry("400x260")
-        frm = ttk.Frame(win, padding=16)
-        frm.pack(fill="both", expand=True)
-
-        phone = tk.StringVar(value=self.cfg.get("phone", ""))
-        code = tk.StringVar()
-        pwd = tk.StringVar()
-
-        ttk.Label(frm, text="Telefone (ex: +5571999999999)").pack(anchor="w")
-        ttk.Entry(frm, textvariable=phone).pack(fill="x", pady=(0, 8))
-
-        self._code_hash = None
-        btn_entrar_ref = {}
-
-        def enviar_codigo():
-            tel = phone.get().strip()
-            if not tel.startswith("+"):
-                messagebox.showerror("Erro", "Use o formato internacional: +55...",
-                                     parent=win)
-                return
-            self.cfg["phone"] = tel
-            save_config(self.cfg)
-
-            def done(sent, e):
-                if e:
-                    self._code_hash = None
-                    self.logmsg(f"Erro ao enviar código: {e}")
-                    messagebox.showerror("Erro", str(e), parent=win)
-                    return
-                self._code_hash = sent.phone_code_hash
-                self.logmsg(f"Código enviado (hash {self._code_hash[:8]}...).")
-                if btn_entrar_ref:
-                    btn_entrar_ref["b"].configure(state="normal")
-
-            self.runner.submit(self.client.send_code_request(tel), done, self)
-
-        ttk.Button(frm, text="Enviar código", command=enviar_codigo).pack(anchor="w")
-
-        ttk.Label(frm, text="Código recebido").pack(anchor="w", pady=(12, 0))
-        ttk.Entry(frm, textvariable=code).pack(fill="x")
-        ttk.Label(frm, text="Senha 2FA (se houver)").pack(anchor="w", pady=(8, 0))
-        ttk.Entry(frm, textvariable=pwd, show="•").pack(fill="x")
-
-        async def _signin():
-            try:
-                await self.client.sign_in(
-                    phone=self.cfg["phone"],
-                    code=code.get().strip(),
-                    phone_code_hash=self._code_hash,
-                )
-            except SessionPasswordNeededError:
-                await self.client.sign_in(password=pwd.get())
-            return True
-
-        def entrar():
-            if not self._code_hash:
-                messagebox.showwarning(
-                    "Atenção",
-                    "Clique em 'Enviar código' antes de entrar.", parent=win)
-                return
-
-            def done(_r, e):
-                if e:
-                    self.logmsg(f"Falha no login: {type(e).__name__}: {e}")
-                    messagebox.showerror("Erro", str(e), parent=win)
-                else:
-                    self.status_var.set("conectado")
-                    self.logmsg("Login concluído.")
-                    win.destroy()
-
-            self.runner.submit(_signin(), done, self)
-
-        b = ttk.Button(frm, text="Entrar", style="Acento.TButton",
-                       command=entrar, state="disabled")
-        b.pack(pady=14)
-        btn_entrar_ref["b"] = b
-
-    # --------------------------------------------------------- diálogos
-    def load_dialogs(self):
-        if not self.client:
-            messagebox.showwarning("Atenção", "Conecte-se primeiro.")
-            return
-        self.logmsg("Carregando lista de grupos...")
-
-        async def _load():
-            out = []
-            async for d in self.client.iter_dialogs():
-                if d.is_group or d.is_channel:
-                    kind = "grupo" if d.is_group else "canal"
-                    out.append((d.name or "(sem nome)", kind, d.id, d.entity))
-            return out
-
-        def done(res, err):
-            if err:
-                self.logmsg(f"Erro: {err}")
-                return
-            self.dialogs = res
-            self._render_dialogs()
-            self.logmsg(f"{len(res)} grupos/canais carregados.")
-
-        self.runner.submit(_load(), done, self)
-
-    def _render_dialogs(self):
-        termo = self.filter_var.get().lower().strip()
-        self.tree_dialogs.delete(*self.tree_dialogs.get_children())
-        for i, (nome, kind, did, _ent) in enumerate(self.dialogs):
-            if termo and termo not in nome.lower():
-                continue
-            self.tree_dialogs.insert("", "end", iid=str(i),
-                                     tags=("par",) if i % 2 else (),
-                                     values=(nome, kind, did))
-
-    def use_manual(self):
-        alvo = self.manual_var.get().strip()
-        if not alvo:
-            return
-        alvo = alvo.rstrip("/").split("/")[-1].lstrip("@")
-
-        def done(ent, err):
-            if err:
-                self.logmsg(f"Não consegui resolver '{alvo}': {err}")
-                return
-            self.current_entity = ent
-            nome = getattr(ent, "title", None) or getattr(ent, "username", alvo)
-            self.grupo_label.configure(text=nome)
-            self.nb.select(1)
-            self.logmsg(f"Grupo definido: {nome}")
-
-        self.runner.submit(self.client.get_entity(alvo), done, self)
-
-    def analyze_selected(self):
-        sel = self.tree_dialogs.selection()
-        if not sel:
-            messagebox.showinfo("Selecione", "Escolha um grupo na lista.")
-            return
-        nome, _kind, _did, ent = self.dialogs[int(sel[0])]
-        self.current_entity = ent
-        self.grupo_label.configure(text=nome)
-        self.nb.select(1)
-        self.start_scan()
-
-    # ----------------------------------------------------------- scan
     def start_scan(self):
         if self.current_entity is None:
             messagebox.showinfo("Selecione", "Escolha um grupo primeiro.")
@@ -1108,6 +855,8 @@ class App(tk.Tk):
             limite = 0
 
         self.btn_scan.configure(state="disabled")
+        self.analisando = True
+        self._titulo("⏳ ")
         self.tree_ext.delete(*self.tree_ext.get_children())
         self.scan_index = {}
         self.logmsg("Analisando (só metadados, nada é baixado)...")
@@ -1143,17 +892,25 @@ class App(tk.Tk):
             return dict(index)
 
         def done(res, err):
+            if not self.winfo_exists():
+                return                       # aba fechada durante a analise
+            self.analisando = False
             self.btn_scan.configure(state="normal")
             if err:
+                self._titulo()
                 self.logmsg(f"Erro na análise: {err}")
                 return
             self.scan_index = res
             self._render_scan()
+            self._titulo_final()
+            self._agrupar_modelos()
 
         self.runner.submit(_scan(), done, self)
 
-    def _render_scan(self):
+    def _render_scan(self, log=True):
         """Monta a arvore: categoria -> extensao -> arquivos (sob demanda)."""
+        self._posts_com_foto = None
+        self.tree_ext.heading("tipo", text="Categoria / tipo / arquivo")
         self.tree_ext.delete(*self.tree_ext.get_children())
         self._por_id = {}
         self._por_cat = defaultdict(list)
@@ -1190,6 +947,9 @@ class App(tk.Tk):
                 self.tree_ext.insert(no_ext, "end",
                                      iid=f"ph::{ext}", values=("carregando...",))
 
+        if not log:
+            self._update_selection_label()
+            return
         g_qtd = sum(len(v) for v in self.scan_index.values())
         g_tot = sum(i["size"] for v in self.scan_index.values() for i in v)
         dups = [i for v in self.scan_index.values() for i in v if i["dup"]]
@@ -1200,9 +960,156 @@ class App(tk.Tk):
         self._update_disk()
         self._update_selection_label()
 
-    def _expandir_no(self, _evt=None):
-        """Carrega os arquivos de uma extensao na primeira vez que ela abre."""
-        iid = self.tree_ext.focus()
+    # ---------------------------------------------- visao por modelo
+    def _agrupar_modelos(self):
+        """Agrupa por nome parecido numa thread, sem travar a janela."""
+        todos = []
+        for ext, itens in self.scan_index.items():
+            for it in itens:
+                it["ext"] = ext
+                todos.append(it)
+        self.vis_info.configure(text="agrupando por nome...")
+
+        def trabalho():
+            rotulo, nomes = agrupar_por_nome(todos)
+            grupos = defaultdict(list)
+            for i, it in enumerate(todos):
+                grupos[rotulo[i]].append(it)
+            resultado = {}
+            for cid, itens in grupos.items():
+                termos = " ".join(_sem_acento(i["name"] or "").lower() for i in itens)
+                resultado[cid] = {
+                    "nome": nomes[cid],
+                    "itens": itens,
+                    "tam": sum(i["size"] for i in itens),
+                    "busca": _sem_acento(nomes[cid]).lower() + " " + termos,
+                }
+            try:
+                self.after(0, self._modelos_prontos, resultado)
+            except (tk.TclError, RuntimeError):
+                pass
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _modelos_prontos(self, resultado):
+        self._grupos_nome = resultado
+        self._grupo_de_id = {it["id"]: cid for cid, g in resultado.items()
+                             for it in g["itens"]}
+        multi = sum(1 for g in resultado.values() if len(g["itens"]) > 1)
+        self.logmsg(f"Agrupamento por nome: {len(resultado)} modelos "
+                    f"({multi} com mais de um arquivo).")
+        if self.vis_var.get().startswith("Modelo"):
+            self._render_nomes()
+        else:
+            self.vis_info.configure(text="")
+
+    def _trocar_visao(self):
+        if self.vis_var.get().startswith("Modelo"):
+            if not self._grupos_nome:
+                self.vis_info.configure(
+                    text="analise um grupo primeiro" if not self.scan_index
+                    else "agrupando por nome...")
+                return
+            self._render_nomes()
+        else:
+            self.vis_info.configure(text="")
+            if self.scan_index:
+                self._render_scan(log=False)
+
+    def _agendar_busca(self):
+        """Espera o usuario parar de digitar antes de filtrar."""
+        if self._busca_job:
+            self.after_cancel(self._busca_job)
+        self._busca_job = self.after(250, self._aplicar_busca)
+
+    def _aplicar_busca(self):
+        self._busca_job = None
+        if not self.vis_var.get().startswith("Modelo"):
+            if self.busca_var.get().strip() and self._grupos_nome:
+                self.vis_var.set("Modelo (nome parecido)")
+            else:
+                return
+        self._render_nomes()
+
+    def _render_nomes(self):
+        """Arvore: modelo -> arquivos (stl, 3mf, fotos...)."""
+        t = self.tree_ext
+        t.heading("tipo", text="Modelo / arquivo")
+        t.delete(*t.get_children())
+        termo = _sem_acento(self.busca_var.get().strip()).lower()
+
+        grupos = [(cid, g) for cid, g in self._grupos_nome.items()
+                  if not termo or termo in g["busca"]]
+        grupos.sort(key=lambda kv: (-(len(kv[1]["itens"]) > 1), -kv[1]["tam"]))
+        multi = [(c, g) for c, g in grupos if len(g["itens"]) > 1]
+        unicos = [(c, g) for c, g in grupos if len(g["itens"]) == 1]
+        self._unicos_visiveis = [c for c, _g in unicos]
+
+        limite = 2000
+        for cid, g in multi[:limite]:
+            exts = sorted({i["ext"].lstrip(".") or "?" for i in g["itens"]})
+            rotulo = f"{g['nome']}    ·  {' · '.join(exts)}"
+            no = t.insert("", "end", iid=f"grp::{cid}", tags=("cat",),
+                          values=(rotulo, len(g["itens"]), human(g["tam"]), g["tam"]))
+            t.insert(no, "end", iid=f"ph::g{cid}", values=("carregando...",))
+
+        if unicos:
+            tot = sum(g["tam"] for _c, g in unicos)
+            no = t.insert("", "end", iid="unicos::", tags=("cat",),
+                          values=(f"Arquivos sem par", len(unicos), human(tot), tot))
+            t.insert(no, "end", iid="ph::unicos", values=("carregando...",))
+
+        txt = f"{len(multi)} modelos agrupados · {len(unicos)} arquivos sem par"
+        if len(multi) > limite:
+            txt += f" · mostrando {limite} — use a busca"
+        self.vis_info.configure(text=txt)
+        self._update_selection_label()
+
+    def _inserir_arquivo(self, pai, it, n):
+        """Linha de arquivo individual na arvore (comum as duas visoes)."""
+        com_foto = getattr(self, "_posts_com_foto", None)
+        if com_foto is None:
+            com_foto = self._posts_com_foto = {
+                g for g, v in self._por_grupo.items()
+                if any(i.get("foto") for i in v)}
+        marca = "  (dup)" if it["dup"] else ""
+        if it.get("grupo") in com_foto and not it.get("foto"):
+            marca += "  🖼"
+        nome = it["name"] or ("(foto)" if it.get("foto")
+                              else f"(sem nome) msg {it['id']}")
+        tags = []
+        if n % 2:
+            tags.append("par")
+        if it["dup"]:
+            tags.append("dup")
+        self.tree_ext.insert(
+            pai, "end", iid=f"file::{it['id']}", tags=tuple(tags),
+            values=(f"        {nome}{marca}", "", human(it["size"]), it["size"]))
+
+    def _carregar_filhos(self, iid):
+        """Preenche um no de modelo (ou o de arquivos sem par) sob demanda."""
+        t = self.tree_ext
+        filhos = t.get_children(iid)
+        if not (len(filhos) == 1 and filhos[0].startswith("ph::")):
+            return
+        t.delete(filhos[0])
+        if iid == "unicos::":
+            itens = [self._grupos_nome[c]["itens"][0]
+                     for c in getattr(self, "_unicos_visiveis", [])]
+        else:
+            itens = self._grupos_nome.get(int(iid[5:]), {}).get("itens", [])
+        ordem = {"modelos-3d": 0, "compactados": 1, "imagens": 2}
+        itens = sorted(itens, key=lambda i: (ordem.get(categoria_de(i["ext"]), 3),
+                                             (i["name"] or "").lower()))
+        for n, it in enumerate(itens[:1500]):
+            self._inserir_arquivo(iid, it, n)
+
+    def _expandir_no(self, _evt=None, iid=None):
+        """Carrega os arquivos de um no na primeira vez que ele abre."""
+        iid = iid or self.tree_ext.focus()
+        if iid.startswith("grp::") or iid == "unicos::":
+            self._carregar_filhos(iid)
+            return
         if not iid.startswith("ext::"):
             return
         filhos = self.tree_ext.get_children(iid)
@@ -1301,7 +1208,9 @@ class App(tk.Tk):
                                  "pip install pillow")
             return
 
-        cache = THUMB_DIR / f"{foto['id']}.jpg"
+        # ids de mensagem se repetem entre grupos: o cache inclui o grupo
+        gid = getattr(self.current_entity, "id", 0)
+        cache = THUMB_DIR / f"{gid}_{foto['id']}.jpg"
         if cache.exists():
             self._pintar(cache)
             return
@@ -1356,15 +1265,27 @@ class App(tk.Tk):
             return
         irmaos = self._por_grupo.get(item["grupo"], [])
         self._garantir_visivel([i["id"] for i in irmaos])
-        self.tree_ext.selection_add(*[f"file::{i['id']}" for i in irmaos])
+        existentes = [f"file::{i['id']}" for i in irmaos
+                      if self.tree_ext.exists(f"file::{i['id']}")]
+        if existentes:
+            self.tree_ext.selection_add(*existentes)
 
     def _marcar_atual(self):
         item = getattr(self, "_item_prev", None)
-        if item:
+        if item and self.tree_ext.exists(f"file::{item['id']}"):
             self.tree_ext.selection_add(f"file::{item['id']}")
 
     def _garantir_visivel(self, ids):
-        """Abre as extensoes necessarias para que esses ids existam na arvore."""
+        """Abre os nos necessarios para que esses ids existam na arvore."""
+        if self.vis_var.get().startswith("Modelo"):
+            for cid in {self._grupo_de_id.get(i) for i in ids} - {None}:
+                no = f"grp::{cid}"
+                if not self.tree_ext.exists(no):
+                    no = "unicos::"
+                if self.tree_ext.exists(no):
+                    self._carregar_filhos(no)
+                    self.tree_ext.item(no, open=True)
+            return
         exts = set()
         for ext, itens in self.scan_index.items():
             if any(i["id"] in set(ids) for i in itens):
@@ -1380,8 +1301,13 @@ class App(tk.Tk):
                 self._expandir_no()
 
     def _expandir_categorias(self):
-        """Abre todas as categorias (as extensoes carregam ao serem abertas)."""
-        for iid in self.tree_ext.get_children():
+        """Abre os nos de primeiro nivel (na visao por modelo, ate 300)."""
+        modelo = self.vis_var.get().startswith("Modelo")
+        for n, iid in enumerate(self.tree_ext.get_children()):
+            if modelo:
+                if n >= 300:
+                    break
+                self._carregar_filhos(iid)
             self.tree_ext.item(iid, open=True)
 
     def _itens_de(self, iid):
@@ -1395,6 +1321,11 @@ class App(tk.Tk):
         if iid.startswith("file::"):
             it = self._por_id.get(int(iid[6:]))
             return [it] if it else []
+        if iid.startswith("grp::"):
+            return list(self._grupos_nome.get(int(iid[5:]), {}).get("itens", []))
+        if iid == "unicos::":
+            return [self._grupos_nome[c]["itens"][0]
+                    for c in getattr(self, "_unicos_visiveis", [])]
         return []  # placeholders e "mais::" nao contam sozinhos
 
     def _selecao_efetiva(self):
@@ -1432,8 +1363,9 @@ class App(tk.Tk):
     def _preview_org(self):
         """Mostra um exemplo do caminho resultante."""
         modo = self.org_var.get()
-        sub = subpasta(modo, ".stl")
-        exemplo = os.path.join(sub, "peca.stl") if sub else "peca.stl"
+        sub = subpasta(modo, ".stl", modelo="Suporte Bancada")
+        exemplo = os.path.join(sub, "suporte_bancada_v2.stl") if sub \
+            else "suporte_bancada_v2.stl"
         self.org_label.configure(text=f"ex.: {exemplo}")
 
     def reorganizar(self):
@@ -1461,6 +1393,13 @@ class App(tk.Tk):
             f"para subpastas no modo '{modo}'?"):
             return
 
+        # no modo por modelo, agrupa os proprios arquivos locais pelo nome
+        modelo_de = {}
+        if modo.startswith("Modelo"):
+            locais = [{"name": f.name, "ext": f.suffix.lower()} for f in soltos]
+            rotulo, nomes = agrupar_por_nome(locais)
+            modelo_de = {f: nomes[rotulo[i]] for i, f in enumerate(soltos)}
+
         movidos, erros = 0, 0
         for f in soltos:
             try:
@@ -1468,7 +1407,7 @@ class App(tk.Tk):
                 if modo.startswith("Ano-mês"):
                     from datetime import datetime
                     data = datetime.fromtimestamp(f.stat().st_mtime)
-                sub = subpasta(modo, f.suffix, data)
+                sub = subpasta(modo, f.suffix, data, modelo_de.get(f))
                 alvo_dir = dest / sub
                 alvo_dir.mkdir(parents=True, exist_ok=True)
                 destino = alvo_dir / f.name
@@ -1523,6 +1462,8 @@ class App(tk.Tk):
 
         modo_org = self.org_var.get()
         self.cancel_flag.clear()
+        self.baixando = True
+        self._titulo("⬇ ")
         self.btn_download.configure(state="disabled")
         self.btn_cancel.configure(state="normal")
         self.progress.configure(maximum=max(len(alvo), 1), value=0)
@@ -1545,7 +1486,9 @@ class App(tk.Tk):
                     if msg is None or not msg.file:
                         continue
                     ext = (msg.file.ext or "").lower()
-                    sub = subpasta(modo_org, ext, msg.date)
+                    cid = self._grupo_de_id.get(msg.id)
+                    modelo = self._grupos_nome[cid]["nome"] if cid is not None else None
+                    sub = subpasta(modo_org, ext, msg.date, modelo)
                     pasta = dest / sub if sub else dest
                     if sub and sub not in pastas_criadas:
                         pasta.mkdir(parents=True, exist_ok=True)
@@ -1570,8 +1513,11 @@ class App(tk.Tk):
                     feitos += 1
                     if caminho:
                         baixados.add(msg.id)
-                    self.after(0, self._tick, feitos, len(alvo),
-                               Path(caminho).name if caminho else "(pulado)")
+                    try:
+                        self.after(0, self._tick, feitos, len(alvo),
+                                   Path(caminho).name if caminho else "(pulado)")
+                    except (tk.TclError, RuntimeError):
+                        break                # aba fechada: encerra o download
                     if feitos % 20 == 0:
                         state_file.write_text(json.dumps(sorted(baixados)))
                     await asyncio.sleep(0.4)  # respiro anti flood
@@ -1580,6 +1526,10 @@ class App(tk.Tk):
             return feitos
 
         def done(res, err):
+            self.baixando = False
+            if not self.winfo_exists():
+                return
+            self._titulo_final()
             self.btn_download.configure(state="normal")
             self.btn_cancel.configure(state="disabled")
             if err:
@@ -1597,6 +1547,608 @@ class App(tk.Tk):
         self.prog_label.configure(text=f"{feitos}/{total}")
         if feitos % 5 == 0 or feitos == total:
             self.logmsg(f"  [{feitos}/{total}] {nome}")
+
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Telegram Downloader")
+        self.geometry("1180x780")
+        self.minsize(880, 620)
+
+        self.runner = AsyncRunner()
+        self.client = None
+        self.cfg = load_config()
+
+        self.dialogs = []          # lista de (nome, tipo, id, entity)
+        self.abas = {}             # id do grupo -> AbaAnalise
+        self.log_queue = queue.Queue()
+        self.status_var = tk.StringVar(value="Desconectado")
+        self.filter_var = tk.StringVar()
+
+        self._build_ui()
+        self._drain_log()
+        self.after(300, self._auto_connect)
+
+    # ---------------------------------------------------------------- UI
+    def _build_ui(self):
+        P = PALETA
+        self.F = aplicar_tema(self)
+
+        # ---- cabeçalho
+        topo = tk.Frame(self, bg=P["cartao"], height=64)
+        topo.pack(fill="x")
+        topo.pack_propagate(False)
+        tk.Frame(self, bg=P["borda"], height=1).pack(fill="x")
+
+        marca = tk.Frame(topo, bg=P["cartao"])
+        marca.pack(side="left", padx=18)
+        self.logo = tk.Canvas(marca, width=34, height=34, bg=P["cartao"],
+                              highlightthickness=0)
+        self.logo.pack(side="left", pady=15)
+        self._desenhar_logo()
+        textos = tk.Frame(marca, bg=P["cartao"])
+        textos.pack(side="left", padx=10)
+        tk.Label(textos, text="Telegram Downloader", bg=P["cartao"],
+                 fg=P["texto"], font=self.F["h3"]).pack(anchor="w")
+        tk.Label(textos, text="baixe arquivos de grupos com organização",
+                 bg=P["cartao"], fg=P["suave"], font=self.F["peq"]).pack(anchor="w")
+
+        direita = tk.Frame(topo, bg=P["cartao"])
+        direita.pack(side="right", padx=18)
+        self.btn_login = ttk.Button(direita, text="Conectar",
+                                    style="Plano.TButton", command=self._open_login)
+        self.btn_login.pack(side="right", pady=16)
+        self.pill = tk.Label(direita, textvariable=self.status_var,
+                             bg="#f0f2f5", fg=P["suave"], font=self.F["peq"],
+                             padx=12, pady=5)
+        self.pill.pack(side="right", padx=12, pady=16)
+        self.status_var.trace_add("write", lambda *_a: self._pintar_pill())
+
+        outer = ttk.Frame(self, padding=14)
+        outer.pack(fill="both", expand=True)
+
+        # divisor arrastável entre as abas e o log
+        paned = ttk.PanedWindow(outer, orient="vertical")
+        paned.pack(fill="both", expand=True)
+
+        nb_frame = ttk.Frame(paned)
+        nb_frame.configure(height=380)
+        self.nb = ttk.Notebook(nb_frame)
+        self.nb.pack(fill="both", expand=True)
+        paned.add(nb_frame, weight=4)
+        # impede que a divisória seja arrastada a ponto de sumir com as abas
+        paned.bind("<B1-Motion>", self._limitar_divisoria, add="+")
+        paned.bind("<ButtonRelease-1>", self._limitar_divisoria, add="+")
+        self._paned = paned
+
+        self._build_tab_grupos()
+        self._criar_imgs_fechar()
+        self.nb.bind("<ButtonPress-1>", self._clique_aba, add="+")
+        self.nb.bind("<ButtonRelease-1>", lambda e: self._clique_aba(e, soltou=True),
+                     add="+")
+        self.nb.bind("<Motion>", self._hover_aba, add="+")
+        self.nb.bind("<Leave>", lambda _e: self._hover_aba(None), add="+")
+        for tecla in ("<Command-w>", "<Control-w>"):
+            try:
+                self.bind_all(tecla, lambda _e: self._fechar_atual())
+            except tk.TclError:
+                pass
+
+        # --- log (arraste a divisória acima para aumentar)
+        log_frame = ttk.Frame(paned)
+        cab = ttk.Frame(log_frame)
+        cab.pack(fill="x", pady=(8, 2))
+        ttk.Label(cab, text="Atividade", style="H3.TLabel").pack(side="left")
+        ttk.Label(cab, text="arraste a divisória acima para ampliar",
+                  style="Suave.TLabel").pack(side="left", padx=10)
+        ttk.Button(cab, text="Limpar", style="Plano.TButton",
+                   command=self._clear_log).pack(side="right")
+
+        caixa = ttk.Frame(log_frame)
+        caixa.pack(fill="both", expand=True)
+        self.log = tk.Text(caixa, height=8, wrap="word", font=self.F["mono"],
+                           bg=PALETA["log_fundo"], fg=PALETA["log_texto"],
+                           insertbackground=PALETA["log_texto"],
+                           relief="flat", padx=12, pady=10,
+                           selectbackground=PALETA["acento"])
+        barra = ttk.Scrollbar(caixa, orient="vertical", command=self.log.yview)
+        self.log.configure(yscrollcommand=barra.set)
+        barra.pack(side="right", fill="y")
+        self.log.pack(side="left", fill="both", expand=True)
+        self.log.configure(state="disabled")
+        paned.add(log_frame, weight=1)
+
+    def _limitar_divisoria(self, _evt=None):
+        """Garante uma altura minima para as abas."""
+        try:
+            pos = self._paned.sashpos(0)
+        except Exception:  # noqa: BLE001
+            return
+        if pos < 320:
+            self._paned.sashpos(0, 320)
+
+    def _ajustar_janela(self, win, largura_min=460):
+        """Dimensiona o diálogo pelo conteúdo e centraliza sobre o app."""
+        if not win.winfo_exists():
+            return
+        win.update_idletasks()
+        w = max(win.winfo_reqwidth(), largura_min)
+        h = win.winfo_reqheight() + 10
+        x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+        y = self.winfo_rooty() + max(40, (self.winfo_height() - h) // 3)
+        win.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+        win.minsize(w, h)
+        win.lift()
+        win.focus_force()
+
+    def _desenhar_logo(self):
+        """Miniatura do icone desenhada direto no canvas."""
+        c, P = self.logo, PALETA
+        c.create_rectangle(1, 1, 33, 33, fill=P["acento"], outline="")
+        c.create_rectangle(15, 8, 20, 19, fill="white", outline="")
+        c.create_polygon(11, 17, 24, 17, 17.5, 25, fill="white", outline="")
+        c.create_rectangle(9, 27, 26, 29, fill="white", outline="")
+
+    def _pintar_pill(self):
+        """Colore a etiqueta de status conforme o estado."""
+        txt = self.status_var.get().lower()
+        P = PALETA
+        if "conectado" in txt:
+            fundo, frente = "#e6f4ec", P["ok"]
+        elif "erro" in txt or "não" in txt or "nao" in txt:
+            fundo, frente = "#fbeae8", P["alerta"]
+        elif "conectando" in txt:
+            fundo, frente = P["acento_luz"], P["acento"]
+        else:
+            fundo, frente = "#f0f2f5", P["suave"]
+        self.pill.configure(bg=fundo, fg=frente)
+
+    def _clear_log(self):
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+
+    def _build_tab_grupos(self):
+        tab = ttk.Frame(self.nb, padding=10)
+        self.nb.add(tab, text="  Grupos  ")
+
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x", pady=(0, 8))
+        ttk.Button(bar, text="Carregar grupos", style="Acento.TButton",
+                   command=self.load_dialogs).pack(side="left")
+        ttk.Label(bar, text="Filtrar:").pack(side="left", padx=(16, 4))
+        ent = ttk.Entry(bar, textvariable=self.filter_var, width=30)
+        ent.pack(side="left")
+        ent.bind("<KeyRelease>", lambda _e: self._render_dialogs())
+
+        ttk.Label(bar, text="ou @username / link:").pack(side="left", padx=(16, 4))
+        self.manual_var = tk.StringVar()
+        ttk.Entry(bar, textvariable=self.manual_var, width=24).pack(side="left")
+        ttk.Button(bar, text="Usar", command=self.use_manual).pack(side="left", padx=4)
+
+        # empacotado ANTES da tabela para nunca ser espremido para fora
+        rodape = ttk.Frame(tab)
+        rodape.pack(side="bottom", fill="x", pady=(8, 0))
+        ttk.Label(rodape, text="Cada grupo analisado abre numa aba própria — "
+                               "dá para analisar vários e comparar.",
+                  style="Suave.TLabel").pack(side="left")
+        ttk.Button(rodape, text="Analisar grupo selecionado  →",
+                   style="Acento.TButton",
+                   command=self.analyze_selected).pack(side="right")
+
+        corpo = ttk.Frame(tab)
+        corpo.pack(side="top", fill="both", expand=True)
+        cols = ("nome", "tipo", "id")
+        self.tree_dialogs = ttk.Treeview(corpo, columns=cols, show="headings", height=8)
+        rol_d = ttk.Scrollbar(corpo, orient="vertical",
+                              command=self.tree_dialogs.yview)
+        self.tree_dialogs.configure(yscrollcommand=rol_d.set)
+        for c, w in zip(cols, (520, 120, 160)):
+            self.tree_dialogs.heading(c, text=c.capitalize())
+            self.tree_dialogs.column(c, width=w, anchor="w")
+        rol_d.pack(side="right", fill="y")
+        self.tree_dialogs.pack(side="left", fill="both", expand=True)
+        self.tree_dialogs.bind("<Double-1>", lambda _e: self.analyze_selected())
+        self.tree_dialogs.tag_configure("par", background=PALETA["listra"])
+
+
+    def logmsg(self, txt):
+        self.log_queue.put(txt)
+
+    def _drain_log(self):
+        while not self.log_queue.empty():
+            txt = self.log_queue.get()
+            self.log.configure(state="normal")
+            self.log.insert("end", txt + "\n")
+            self.log.see("end")
+            self.log.configure(state="disabled")
+        self.after(150, self._drain_log)
+
+    # ----------------------------------------------------------- login
+    def _auto_connect(self):
+        if self.cfg.get("api_id") and self.cfg.get("api_hash"):
+            self.status_var.set("conectando...")
+            self.runner.submit(self._connect(), self._after_connect, self)
+        else:
+            self._boas_vindas()
+
+    def _boas_vindas(self):
+        """Primeira execucao: explica em uma tela o que vai acontecer."""
+        win = tk.Toplevel(self)
+        win.title("Bem-vindo")
+        win.configure(bg=PALETA["fundo"])
+        self.after(20, lambda: self._ajustar_janela(win, 540))
+        win.transient(self)
+        frm = ttk.Frame(win, padding=24)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Telegram Downloader",
+                  style="H1.TLabel").pack(anchor="w")
+        ttk.Label(frm, text="Baixe arquivos de grupos e canais de forma organizada",
+                  style="Suave.TLabel").pack(anchor="w", pady=(2, 18))
+
+        passos = (
+            "Como funciona:\n\n"
+            "1.  Você conecta sua conta do Telegram (uma única vez)\n"
+            "2.  Escolhe um grupo ou canal da sua lista\n"
+            "3.  O app analisa e mostra quantos arquivos e quantos GB existem,\n"
+            "     separados por categoria\n"
+            "4.  Você seleciona o que quer — categorias inteiras ou arquivos\n"
+            "     avulsos, vendo a foto de cada modelo antes de decidir\n"
+            "5.  Baixa, com as pastas já organizadas\n\n"
+            "Para conectar, você precisa de duas credenciais gratuitas do\n"
+            "Telegram. A próxima tela explica como obtê-las em 2 minutos."
+        )
+        ttk.Label(frm, text=passos, justify="left", foreground="#333").pack(anchor="w")
+
+        def seguir():
+            win.destroy()
+            self._open_login()
+
+        ttk.Button(frm, text="Começar", style="Acento.TButton",
+                   command=seguir).pack(anchor="w", pady=(20, 0))
+        win.protocol("WM_DELETE_WINDOW", seguir)
+
+    async def _connect(self):
+        self.client = TelegramClient(SESSION, int(self.cfg["api_id"]),
+                                     self.cfg["api_hash"])
+        await self.client.connect()
+        return await self.client.is_user_authorized()
+
+    def _after_connect(self, authorized, err):
+        if err:
+            self.status_var.set("erro de conexão")
+            self.logmsg(f"Erro ao conectar: {err}")
+            return
+        if authorized:
+            self.status_var.set("conectado")
+            self.btn_login.configure(text="Reconectar")
+            self.logmsg("Conectado. Vá para a aba '1. Grupos' e clique em "
+                        "'Carregar grupos'.")
+        else:
+            self.status_var.set("não autenticado")
+            self._open_phone_dialog()
+
+    def _open_login(self):
+        win = tk.Toplevel(self)
+        win.title("Credenciais da API")
+        win.configure(bg=PALETA["fundo"])
+        self.after(20, lambda: self._ajustar_janela(win, 560))
+        frm = ttk.Frame(win, padding=22)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Credenciais do Telegram",
+                  style="H2.TLabel").pack(anchor="w")
+
+        api_id = tk.StringVar(value=str(self.cfg.get("api_id", "")))
+        api_hash = tk.StringVar(value=self.cfg.get("api_hash", ""))
+
+        campos = ttk.Frame(frm)
+        campos.pack(fill="x", pady=(12, 6))
+        for label, var in (("api_id", api_id), ("api_hash", api_hash)):
+            row = ttk.Frame(campos)
+            row.pack(fill="x", pady=4)
+            ttk.Label(row, text=label, width=10).pack(side="left")
+            ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+
+        # --- ajuda para quem ainda não tem credenciais
+        ajuda = ttk.LabelFrame(frm, text="Ainda não tenho essas credenciais",
+                               padding=12)
+        ajuda.pack(fill="both", expand=True, pady=(14, 0))
+
+        passos = (
+            "São gratuitas, levam 2 minutos e ficam vinculadas à sua conta.\n\n"
+            "1. Clique no botão abaixo para abrir my.telegram.org\n"
+            "2. Informe seu telefone (+55...); o código chega no app do Telegram\n"
+            "3. Entre em 'API development tools'\n"
+            "4. Preencha App title e Short name (qualquer nome serve) e\n"
+            "     escolha a plataforma Desktop; URL e descrição podem ficar vazias\n"
+            "5. Clique em 'Create application'\n"
+            "6. Copie App api_id e App api_hash para os campos acima"
+        )
+        ttk.Label(ajuda, text=passos, justify="left", wraplength=460,
+                  foreground="#444").pack(anchor="w")
+
+        linha_botoes = ttk.Frame(ajuda)
+        linha_botoes.pack(anchor="w", pady=(10, 0))
+        ttk.Button(linha_botoes, text="Abrir my.telegram.org",
+                   command=lambda: webbrowser.open(
+                       "https://my.telegram.org/auth?to=apps")).pack(side="left")
+        ttk.Label(linha_botoes, text="não compartilhe essas credenciais",
+                  foreground="#a33").pack(side="left", padx=10)
+
+        def salvar():
+            bruto = api_id.get().strip()
+            h = api_hash.get().strip()
+            if not bruto or not h:
+                messagebox.showerror(
+                    "Erro",
+                    "Preencha api_id e api_hash. Use o botão acima se ainda "
+                    "não os tiver.", parent=win)
+                return
+            try:
+                self.cfg["api_id"] = int(bruto)
+            except ValueError:
+                messagebox.showerror("Erro", "api_id deve ser numérico "
+                                             "(apenas dígitos).", parent=win)
+                return
+            if len(h) != 32 and not messagebox.askyesno(
+                "Confirmar",
+                f"O api_hash costuma ter 32 caracteres; o informado tem "
+                f"{len(h)}. Continuar mesmo assim?", parent=win):
+                return
+            self.cfg["api_hash"] = h
+            save_config(self.cfg)
+            win.destroy()
+            self.status_var.set("conectando...")
+            self.runner.submit(self._connect(), self._after_connect, self)
+
+        ttk.Button(frm, text="Salvar e conectar", style="Acento.TButton",
+                   command=salvar).pack(pady=14)
+
+    def _open_phone_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("Login")
+        win.configure(bg=PALETA["fundo"])
+        self.after(20, lambda: self._ajustar_janela(win, 460))
+        frm = ttk.Frame(win, padding=24)
+        frm.pack(fill="both", expand=True)
+
+        phone = tk.StringVar(value=self.cfg.get("phone", ""))
+        code = tk.StringVar()
+        pwd = tk.StringVar()
+
+        ttk.Label(frm, text="Entrar no Telegram", style="H2.TLabel").pack(anchor="w")
+        ttk.Label(frm, text="O código de acesso chega no próprio app do Telegram.",
+                  style="Suave.TLabel").pack(anchor="w", pady=(2, 16))
+
+        ttk.Label(frm, text="Telefone (ex: +5571999999999)").pack(anchor="w")
+        ttk.Entry(frm, textvariable=phone, width=34).pack(fill="x", pady=(4, 8))
+
+        self._code_hash = None
+        btn_entrar_ref = {}
+
+        def enviar_codigo():
+            tel = phone.get().strip()
+            if not tel.startswith("+"):
+                messagebox.showerror("Erro", "Use o formato internacional: +55...",
+                                     parent=win)
+                return
+            self.cfg["phone"] = tel
+            save_config(self.cfg)
+
+            def done(sent, e):
+                if e:
+                    self._code_hash = None
+                    self.logmsg(f"Erro ao enviar código: {e}")
+                    messagebox.showerror("Erro", str(e), parent=win)
+                    return
+                self._code_hash = sent.phone_code_hash
+                self.logmsg(f"Código enviado (hash {self._code_hash[:8]}...).")
+                if btn_entrar_ref:
+                    btn_entrar_ref["b"].configure(state="normal")
+
+            self.runner.submit(self.client.send_code_request(tel), done, self)
+
+        ttk.Button(frm, text="Enviar código", style="Acento.TButton",
+                   command=enviar_codigo).pack(anchor="w", pady=(4, 0))
+
+        ttk.Label(frm, text="Código recebido").pack(anchor="w", pady=(18, 0))
+        ttk.Entry(frm, textvariable=code).pack(fill="x", pady=(4, 0))
+        ttk.Label(frm, text="Senha 2FA (se houver)").pack(anchor="w", pady=(12, 0))
+        ttk.Entry(frm, textvariable=pwd, show="•").pack(fill="x", pady=(4, 0))
+
+        async def _signin():
+            try:
+                await self.client.sign_in(
+                    phone=self.cfg["phone"],
+                    code=code.get().strip(),
+                    phone_code_hash=self._code_hash,
+                )
+            except SessionPasswordNeededError:
+                await self.client.sign_in(password=pwd.get())
+            return True
+
+        def entrar():
+            if not self._code_hash:
+                messagebox.showwarning(
+                    "Atenção",
+                    "Clique em 'Enviar código' antes de entrar.", parent=win)
+                return
+
+            def done(_r, e):
+                if e:
+                    self.logmsg(f"Falha no login: {type(e).__name__}: {e}")
+                    messagebox.showerror("Erro", str(e), parent=win)
+                else:
+                    self.status_var.set("conectado")
+                    self.logmsg("Login concluído.")
+                    win.destroy()
+
+            self.runner.submit(_signin(), done, self)
+
+        b = ttk.Button(frm, text="Entrar", style="Acento.TButton",
+                       command=entrar, state="disabled")
+        b.pack(anchor="e", pady=(20, 0))
+        btn_entrar_ref["b"] = b
+
+    # --------------------------------------------------------- diálogos
+    def load_dialogs(self):
+        if not self.client:
+            messagebox.showwarning("Atenção", "Conecte-se primeiro.")
+            return
+        self.logmsg("Carregando lista de grupos...")
+
+        async def _load():
+            out = []
+            async for d in self.client.iter_dialogs():
+                if d.is_group or d.is_channel:
+                    kind = "grupo" if d.is_group else "canal"
+                    out.append((d.name or "(sem nome)", kind, d.id, d.entity))
+            return out
+
+        def done(res, err):
+            if err:
+                self.logmsg(f"Erro: {err}")
+                return
+            self.dialogs = res
+            self._render_dialogs()
+            self.logmsg(f"{len(res)} grupos/canais carregados.")
+
+        self.runner.submit(_load(), done, self)
+
+    def _render_dialogs(self):
+        termo = self.filter_var.get().lower().strip()
+        self.tree_dialogs.delete(*self.tree_dialogs.get_children())
+        for i, (nome, kind, did, _ent) in enumerate(self.dialogs):
+            if termo and termo not in nome.lower():
+                continue
+            self.tree_dialogs.insert("", "end", iid=str(i),
+                                     tags=("par",) if i % 2 else (),
+                                     values=(nome, kind, did))
+
+    def use_manual(self):
+        alvo = self.manual_var.get().strip()
+        if not alvo:
+            return
+        if not self.client:
+            messagebox.showwarning("Atenção", "Conecte-se primeiro.")
+            return
+        alvo = alvo.rstrip("/").split("/")[-1].lstrip("@")
+
+        def done(ent, err):
+            if err:
+                self.logmsg(f"Não consegui resolver '{alvo}': {err}")
+                return
+            nome = getattr(ent, "title", None) or getattr(ent, "username", alvo)
+            self.abrir_analise(ent, nome)
+
+        self.runner.submit(self.client.get_entity(alvo), done, self)
+
+    def analyze_selected(self):
+        sel = self.tree_dialogs.selection()
+        if not sel:
+            messagebox.showinfo("Selecione", "Escolha um grupo na lista.")
+            return
+        for iid in sel:                      # vários de uma vez: uma aba cada
+            nome, _kind, _did, ent = self.dialogs[int(iid)]
+            self.abrir_analise(ent, nome)
+
+    # --------------------------------------------------------- abas
+    def abrir_analise(self, entity, nome):
+        """Abre (ou traz para frente) a aba de análise deste grupo."""
+        chave = getattr(entity, "id", None) or nome
+        aba = self.abas.get(chave)
+        if aba is not None and aba.winfo_exists():
+            self.nb.select(aba)
+            return aba
+        aba = AbaAnalise(self.nb, self, entity, nome)
+        self.nb.add(aba, text=nome, image=self._img_x, compound="right")
+        self.abas[chave] = aba
+        aba._titulo()
+        self.nb.select(aba)
+        aba.start_scan()
+        return aba
+
+    def fechar_aba(self, idx):
+        if idx == 0:
+            return                           # a aba de grupos é fixa
+        aba = self.nametowidget(self.nb.tabs()[idx])
+        if getattr(aba, "baixando", False):
+            if not messagebox.askyesno(
+                    "Download em andamento",
+                    f"'{aba.nome}' ainda está baixando. Cancelar e fechar?"):
+                return
+        aba.cancel_flag.set()
+        self.nb.forget(aba)
+        for k, v in list(self.abas.items()):
+            if v is aba:
+                del self.abas[k]
+        aba.destroy()
+        self._aba_hover = None
+
+    def _fechar_atual(self):
+        try:
+            idx = self.nb.index("current")
+        except tk.TclError:
+            return
+        self.fechar_aba(idx)
+
+    def _criar_imgs_fechar(self):
+        """Um X desenhado pixel a pixel, normal e em destaque."""
+        def x(cor, fundo=None):
+            img = tk.PhotoImage(master=self, width=16, height=16)
+            if fundo:
+                img.put(fundo, to=(1, 1, 15, 15))
+            for i in range(4, 12):
+                for dx in (0, 1):
+                    img.put(cor, (min(i + dx, 11), i))
+                    img.put(cor, (max(15 - i - dx, 4), i))
+            return img
+        self._img_x = x(PALETA["suave"])
+        self._img_x_hover = x("#ffffff", PALETA["alerta"])
+        self._aba_hover = None
+
+    def _aba_sob(self, x, y):
+        """Índice da aba sob o cursor, ou None."""
+        try:
+            idx = self.nb.index(f"@{x},{y}")
+        except (tk.TclError, ValueError):
+            return None
+        return idx if isinstance(idx, int) else None
+
+    def _no_x(self, x, y, idx):
+        """True se (x, y) está sobre o X da aba idx (fim do rótulo)."""
+        borda = x
+        while borda < self.nb.winfo_width() and self._aba_sob(borda, y) == idx:
+            borda += 2
+        return x >= borda - 44
+
+    def _clique_aba(self, evt, soltou=False):
+        idx = self._aba_sob(evt.x, evt.y)
+        if not idx:                          # None ou 0 (Grupos)
+            return None
+        if self._no_x(evt.x, evt.y, idx):
+            if soltou:
+                self.fechar_aba(idx)
+            return "break"                   # não troca de aba ao clicar no X
+        return None
+
+    def _hover_aba(self, evt):
+        alvo = None
+        if evt is not None:
+            idx = self._aba_sob(evt.x, evt.y)
+            if idx and self._no_x(evt.x, evt.y, idx):
+                alvo = idx
+        if alvo == self._aba_hover:
+            return
+        self._aba_hover = alvo
+        for i, t in enumerate(self.nb.tabs()):
+            if i:
+                self.nb.tab(t, image=self._img_x_hover if i == alvo
+                            else self._img_x)
 
 
 if __name__ == "__main__":

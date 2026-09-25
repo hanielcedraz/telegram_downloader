@@ -170,9 +170,15 @@ except ImportError:
 
 from telethon import TelegramClient
 from telethon.errors import (
+    ChannelPrivateError,
+    ChatAdminRequiredError,
     ChatForwardsRestrictedError,
+    ChatSendMediaForbiddenError,
+    ChatWriteForbiddenError,
     FloodWaitError,
     SessionPasswordNeededError,
+    SlowModeWaitError,
+    UserBannedInChannelError,
 )
 
 APP_DIR = Path.home() / ".tg_downloader"
@@ -889,10 +895,13 @@ class AbaAnalise(ttk.Frame):
                                        style="Acento.TButton",
                                        command=self.start_download)
         self.btn_download.pack(side="left")
+        self.btn_enc = ttk.Button(act, text="Encaminhar...",
+                                  command=self.encaminhar_selecionados)
+        self.btn_enc.pack(side="left", padx=8)
         self.btn_cancel = ttk.Button(act, text="Cancelar", state="disabled",
                                      style="Perigo.TButton",
                                      command=lambda: self.cancel_flag.set())
-        self.btn_cancel.pack(side="left", padx=8)
+        self.btn_cancel.pack(side="left")
         barras = ttk.Frame(act)
         barras.pack(side="left", padx=12, fill="x", expand=True)
         linha = ttk.Frame(barras)
@@ -1783,6 +1792,171 @@ class AbaAnalise(ttk.Frame):
         self.logmsg(f"Iniciando download de {len(alvo)} arquivos para {dest} "
                     f"(organização: {modo_org})")
         self.runner.submit(_download(), done, self)
+
+    # ----------------------------------------------------- encaminhar
+    def encaminhar_selecionados(self):
+        """Encaminha os arquivos marcados para outro grupo/canal."""
+        itens = self._selecao_efetiva()
+        if not itens:
+            messagebox.showinfo("Selecione",
+                                "Marque ao menos um arquivo, tipo ou modelo.")
+            return
+        if not self.client:
+            messagebox.showwarning("Atenção", "Conecte-se primeiro.")
+            return
+
+        total = sum(i["size"] for i in itens)
+        win = tk.Toplevel(self)
+        win.title("Encaminhar")
+        win.configure(bg=PALETA["fundo"])
+        win.transient(self.winfo_toplevel())
+        frm = ttk.Frame(win, padding=24)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Encaminhar arquivos", style="H2.TLabel").pack(anchor="w")
+        ttk.Label(frm, text=f"{len(itens)} arquivos · {human(total)} · de "
+                            f"{self.nome}", style="Suave.TLabel").pack(anchor="w",
+                                                                      pady=(2, 16))
+
+        ttk.Label(frm, text="Para qual grupo ou canal:").pack(anchor="w")
+        destinos = [f"{nome}" for nome, _k, _d, _e in self.app.dialogs]
+        escolha = tk.StringVar(self)
+        combo = ttk.Combobox(frm, textvariable=escolha, values=destinos,
+                             state="readonly", width=46)
+        combo.pack(fill="x", pady=(4, 8))
+        if not destinos:
+            ttk.Label(frm, text="Sua lista de grupos ainda não foi carregada — "
+                               "use o campo abaixo.",
+                      style="Suave.TLabel").pack(anchor="w")
+
+        ttk.Label(frm, text="ou @username / link:").pack(anchor="w", pady=(6, 0))
+        manual = tk.StringVar(self)
+        ttk.Entry(frm, textvariable=manual).pack(fill="x", pady=(4, 12))
+
+        sem_origem = tk.BooleanVar(self, value=False)
+        silencioso = tk.BooleanVar(self, value=False)
+        ttk.Checkbutton(frm, text="Ocultar a origem (sem o \"encaminhado de\")",
+                        variable=sem_origem).pack(anchor="w")
+        ttk.Checkbutton(frm, text="Enviar sem notificar os membros",
+                        variable=silencioso).pack(anchor="w", pady=(4, 0))
+
+        ttk.Label(frm, text="Os arquivos não são baixados: o Telegram copia "
+                            "direto entre as conversas.",
+                  style="Suave.TLabel", wraplength=420,
+                  justify="left").pack(anchor="w", pady=(14, 0))
+
+        def seguir():
+            idx = combo.current()
+            alvo_manual = manual.get().strip()
+            if alvo_manual:
+                alvo = alvo_manual.rstrip("/").split("/")[-1].lstrip("@")
+                self.runner.submit(self.client.get_entity(alvo),
+                                   lambda ent, err: self._confirmar_encaminhar(
+                                       win, ent, err, itens, total,
+                                       sem_origem.get(), silencioso.get()),
+                                   self)
+            elif idx >= 0:
+                ent = self.app.dialogs[idx][3]
+                self._confirmar_encaminhar(win, ent, None, itens, total,
+                                           sem_origem.get(), silencioso.get())
+            else:
+                messagebox.showinfo("Destino",
+                                    "Escolha um grupo ou informe um @username.",
+                                    parent=win)
+
+        botoes = ttk.Frame(frm)
+        botoes.pack(fill="x", pady=(20, 0))
+        ttk.Button(botoes, text="Cancelar",
+                   command=win.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(botoes, text="Encaminhar", style="Acento.TButton",
+                   command=seguir).pack(side="right")
+
+        self.after(20, lambda: self.app._ajustar_janela(win, 500))
+
+    def _confirmar_encaminhar(self, win, ent, err, itens, total, sem_origem,
+                              silencioso):
+        if err:
+            messagebox.showerror("Erro", f"Não consegui encontrar o destino:\n{err}",
+                                 parent=win)
+            return
+        nome_dest = (getattr(ent, "title", None) or getattr(ent, "username", None)
+                     or str(getattr(ent, "id", ent)))
+        if getattr(ent, "id", None) == getattr(self.current_entity, "id", object()):
+            messagebox.showwarning("Destino", "A origem e o destino são o mesmo "
+                                              "grupo.", parent=win)
+            return
+        if not messagebox.askyesno(
+                "Confirmar envio",
+                f"Encaminhar {len(itens)} arquivos ({human(total)})\n"
+                f"de: {self.nome}\npara: {nome_dest}?",
+                parent=win):
+            return
+        win.destroy()
+        self._encaminhar(ent, nome_dest, itens, sem_origem, silencioso)
+
+    def _encaminhar(self, destino, nome_dest, itens, sem_origem, silencioso):
+        ids = sorted(i["id"] for i in itens)
+        self.cancel_flag.clear()
+        self.btn_enc.configure(state="disabled")
+        self.btn_cancel.configure(state="normal")
+        self.progress.configure(maximum=1000, value=0)
+        self.logmsg(f"Encaminhando {len(ids)} arquivos para {nome_dest}...")
+
+        async def _envio():
+            enviados = 0
+            for bloco in range(0, len(ids), 100):
+                if self.cancel_flag.is_set():
+                    break
+                lote = ids[bloco:bloco + 100]
+                while True:
+                    try:
+                        await self.client.forward_messages(
+                            destino, lote, from_peer=self.current_entity,
+                            drop_author=sem_origem or None,
+                            silent=silencioso or None)
+                        break
+                    except FloodWaitError as e:
+                        self.logmsg(f"  flood wait: aguardando {e.seconds}s")
+                        await asyncio.sleep(e.seconds + 5)
+                    except SlowModeWaitError as e:
+                        self.logmsg(f"  modo lento no destino: {e.seconds}s")
+                        await asyncio.sleep(e.seconds + 2)
+                    except ChatForwardsRestrictedError:
+                        raise RuntimeError(
+                            "o grupo de origem bloqueia encaminhamento")
+                    except (ChatWriteForbiddenError, ChatAdminRequiredError,
+                            ChatSendMediaForbiddenError,
+                            UserBannedInChannelError) as e:
+                        raise RuntimeError(
+                            f"sem permissão para enviar no destino ({type(e).__name__})")
+                    except ChannelPrivateError:
+                        raise RuntimeError("destino privado ou inacessível")
+                enviados += len(lote)
+                self._agendar(self._tick_envio, enviados, len(ids))
+                await asyncio.sleep(1)       # respiro entre lotes
+            return enviados
+
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            self.btn_enc.configure(state="normal")
+            self.btn_cancel.configure(state="disabled")
+            if err:
+                self.logmsg(f"Encaminhamento interrompido: {err}")
+                self.prog_info.configure(text=f"Falhou: {err}")
+                messagebox.showerror("Não foi possível encaminhar", str(err))
+            else:
+                fim = "cancelado" if self.cancel_flag.is_set() else "concluído"
+                self.logmsg(f"Encaminhamento {fim}: {res} arquivos.")
+                self.prog_info.configure(
+                    text=f"Encaminhamento {fim} — {res} arquivos para {nome_dest}.")
+
+        self.runner.submit(_envio(), done, self)
+
+    def _tick_envio(self, enviados, total):
+        self.progress.configure(value=1000 * enviados / total)
+        self.prog_label.configure(text=f"{enviados}/{total}")
+        self.prog_info.configure(text=f"encaminhando... {enviados} de {total}")
 
     def _agendar(self, func, *args):
         """Chama func na thread da interface. False se a aba já foi fechada."""

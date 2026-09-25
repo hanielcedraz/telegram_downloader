@@ -119,7 +119,14 @@ foto publicada no mesmo post, com legenda e data. O ícone 🖼 na lista indica
 quais arquivos têm imagem disponível. *Selecionar todo o post* marca de uma vez
 o modelo, as fotos e o que mais tiver vindo junto.
 
-**4. Download** — escolha como organizar as pastas e clique em *Baixar
+**4. Encaminhar** — em vez de baixar, dá para mandar os arquivos marcados
+direto para outro grupo ou canal seu, com *Encaminhar...*. Nada é baixado:
+o Telegram copia entre as conversas, então é rápido e não gasta banda. Há
+opção de ocultar a origem (sem o "encaminhado de") e de enviar sem
+notificar os membros. Você precisa ter permissão de envio no destino, e
+grupos com restrição de conteúdo não permitem encaminhar.
+
+**5. Download** — escolha como organizar as pastas e clique em *Baixar
 selecionados*.
 
 | Modo | Resultado |
